@@ -1,0 +1,9 @@
+{
+  "name": "OtimFlix",
+  "description": "Plataforma completa de streaming inspirada na Netflix com catálogo de filmes, busca rápida, categorias, reprodução de vídeo e Minha Lista.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
+

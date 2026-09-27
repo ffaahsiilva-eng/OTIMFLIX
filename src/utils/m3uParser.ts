@@ -92,7 +92,17 @@ export function classifyEntry(
     return 'live';
   }
 
-  // 2. Strict Linear TV Channel detection by name
+  // 2. Linear live streams ending in .ts / .m3u8 without episode/movie indicators
+  // (e.g. http://host:80/user/pass/45227.ts)
+  if (
+    (lowerUrl.endsWith('.ts') || lowerUrl.endsWith('.m3u8')) &&
+    !REGEX_SERIES_TAG.test(lowerTitle) &&
+    !REGEX_YEAR.test(lowerTitle)
+  ) {
+    return 'live';
+  }
+
+  // 3. Strict Linear TV Channel detection by name
   for (let i = 0; i < LINEAR_CHANNELS.length; i++) {
     const ch = LINEAR_CHANNELS[i];
     // Exact match or channel suffix match (e.g. "TNT Series FHD", "Warner Channel SD", "Globo SP HD")
@@ -108,20 +118,20 @@ export function classifyEntry(
     }
   }
 
-  // 3. Series episode / season tag detection
+  // 4. Series episode / season tag detection
   if (REGEX_SERIES_TAG.test(lowerTitle) || REGEX_SERIES_TAG.test(lowerGroup)) {
     return 'series';
   }
 
-  // 4. Group terms check
-  const isSeriesGroup = SERIES_GROUP_TERMS.some((t) => lowerGroup.includes(t));
-  if (isSeriesGroup) {
-    return 'series';
-  }
-
+  // 5. Group terms check
   const isLiveGroup = LIVE_GROUP_TERMS.some((t) => lowerGroup.includes(t));
   if (isLiveGroup) {
     return 'live';
+  }
+
+  const isSeriesGroup = SERIES_GROUP_TERMS.some((t) => lowerGroup.includes(t));
+  if (isSeriesGroup) {
+    return 'series';
   }
 
   const isMovieGroup = MOVIE_GROUP_TERMS.some((t) => lowerGroup.includes(t));
@@ -129,7 +139,7 @@ export function classifyEntry(
     return 'movie';
   }
 
-  // 5. Video file extensions typical of VOD
+  // 6. Video file extensions typical of VOD
   if (
     lowerUrl.endsWith('.mp4') ||
     lowerUrl.endsWith('.mkv') ||
@@ -140,23 +150,17 @@ export function classifyEntry(
     return 'movie';
   }
 
-  // 6. Year in title check (e.g. "Matrix (1999)", "Duna 2024")
+  // 7. Year in title check (e.g. "Matrix (1999)", "Duna 2024")
   if (REGEX_YEAR.test(lowerTitle) && !lowerTitle.includes('24h') && !lowerTitle.includes('24 horas')) {
     return 'movie';
   }
 
-  // 7. Live TV stream extensions
-  if (lowerUrl.endsWith('.m3u8') || lowerUrl.endsWith('.ts')) {
-    // If it ends with .m3u8 or .ts and has no movie/series indication, it is almost certainly a live channel
-    return 'live';
-  }
-
-  // Default fallback
+  // Default fallback for ambiguous items
   return 'live';
 }
 
 /**
- * Fast chunked parser that scans the playlist, filters out live TV channels,
+ * Ultra-fast zero-copy line parser that scans the playlist, filters out live TV channels,
  * and extracts only actual Movies and Series VOD.
  */
 export async function parseM3UAsync(
@@ -168,17 +172,28 @@ export async function parseM3UAsync(
   let ignoredLiveCount = 0;
   let totalParsed = 0;
 
-  const lines = text.split(/\r?\n/);
-  const totalLines = lines.length;
-
   let currentTitle = '';
   let currentGroup = '';
   let currentLogo = '';
 
-  const CHUNK_SIZE = 2500;
+  const CHUNK_SIZE = 8000;
+  let linesProcessed = 0;
+  let pos = 0;
+  const textLen = text.length;
 
-  for (let i = 0; i < totalLines; i++) {
-    const line = lines[i].trim();
+  while (pos < textLen) {
+    let next = text.indexOf('\n', pos);
+    if (next === -1) next = textLen;
+
+    let line = text.substring(pos, next);
+    // Remove carriage return if present
+    if (line.endsWith('\r')) {
+      line = line.substring(0, line.length - 1);
+    }
+    line = line.trim();
+    pos = next + 1;
+    linesProcessed++;
+
     if (!line) continue;
 
     if (line.startsWith('#EXTINF')) {
@@ -241,16 +256,16 @@ export async function parseM3UAsync(
       currentTitle = '';
     }
 
-    if (i % CHUNK_SIZE === 0 && i > 0) {
+    if (linesProcessed % CHUNK_SIZE === 0) {
       if (onProgress) {
-        onProgress(i, movieAndSeriesItems.length);
+        onProgress(linesProcessed, movieAndSeriesItems.length);
       }
       await new Promise((resolve) => setTimeout(resolve, 0));
     }
   }
 
   // If the playlist has movies/series, return ONLY movies and series!
-  // If (and only if) the playlist contained strictly 0 VOD items, fallback to all items with a clear note.
+  // If (and only if) the playlist contained strictly 0 VOD items, fallback to all items.
   const finalItems = movieAndSeriesItems.length > 0 ? movieAndSeriesItems : allParsedRawItems;
 
   return {

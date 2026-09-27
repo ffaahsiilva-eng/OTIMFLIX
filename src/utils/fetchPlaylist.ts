@@ -1,3 +1,5 @@
+export const DEFAULT_M3U_URL = 'http://clipper.lat/get.php?username=jeandryo001&password=622685774&type=m3u_plus&output=mpegts';
+
 /**
  * Fetches remote M3U playlist text using multiple fallback strategies
  * to overcome Browser CORS restrictions, Mixed Content (HTTP on HTTPS), and provider blocking.
@@ -9,12 +11,16 @@ export async function fetchRemoteM3U(
   const cleanUrl = url.trim();
   let detailedError = '';
 
-  // Strategy 1: Local Backend Proxy (server.ts) with decompress & User-Agent rotation
+  // Strategy 1: Local Backend Proxy (server.ts) with decompress, disk caching & User-Agent rotation
   try {
     if (onStatusUpdate) onStatusUpdate('Baixando lista via servidor proxy...');
-    const proxyEndpoint = `/api/proxy-m3u?url=${encodeURIComponent(cleanUrl)}`;
+    const isDefault = cleanUrl === DEFAULT_M3U_URL;
+    const proxyEndpoint = isDefault
+      ? '/api/default-playlist'
+      : `/api/proxy-m3u?url=${encodeURIComponent(cleanUrl)}`;
+
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 45000);
+    const timeout = setTimeout(() => controller.abort(), 75000);
 
     const response = await fetch(proxyEndpoint, { signal: controller.signal });
     clearTimeout(timeout);

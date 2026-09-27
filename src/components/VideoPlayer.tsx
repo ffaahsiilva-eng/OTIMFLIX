@@ -1,4 +1,4 @@
-import React, { useState, useRef, useEffect, useCallback } from 'react';
+import React, { useState, useRef, useEffect, useCallback, useMemo } from 'react';
 import Hls from 'hls.js';
 import {
   ArrowLeft,
@@ -18,25 +18,85 @@ import {
   Tv,
   Sparkles,
   Sliders,
+  SkipForward,
+  SkipBack,
+  Flame,
+  ListVideo,
 } from 'lucide-react';
 import { M3UItem } from '../types/m3u';
 import { openInVlc } from '../utils/playerUtils';
+import {
+  parseEpisodeInfo,
+  findNextEpisode,
+  findPreviousEpisode,
+  getSeriesEpisodes,
+} from '../utils/seriesUtils';
+import { NextEpisodeOverlay } from './NextEpisodeOverlay';
+import { EpisodeDrawer } from './EpisodeDrawer';
 
 type PlaybackMode = 'web-hls' | 'web-hls-transcode' | 'proxy' | 'direct';
 
 interface VideoPlayerProps {
   item: M3UItem;
   onClose: () => void;
+  playlist?: M3UItem[];
+  onPlayItem?: (item: M3UItem) => void;
 }
 
-export const VideoPlayer: React.FC<VideoPlayerProps> = ({ item, onClose }) => {
+export const VideoPlayer: React.FC<VideoPlayerProps> = ({
+  item,
+  onClose,
+  playlist = [],
+  onPlayItem,
+}) => {
   const videoRef = useRef<HTMLVideoElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const progressBarRef = useRef<HTMLDivElement>(null);
   const hlsRef = useRef<Hls | null>(null);
 
-  // Default to our dynamic in-browser HLS engine for all movies/series
+  // Series & Episode Navigation
+  const currentEpisodeInfo = useMemo(() => parseEpisodeInfo(item), [item]);
+  const seriesEpisodes = useMemo(
+    () => (playlist.length > 0 ? getSeriesEpisodes(item, playlist) : [item]),
+    [item, playlist]
+  );
+  const nextEpisode = useMemo(
+    () => (playlist.length > 0 ? findNextEpisode(item, playlist) : null),
+    [item, playlist]
+  );
+  const prevEpisode = useMemo(
+    () => (playlist.length > 0 ? findPreviousEpisode(item, playlist) : null),
+    [item, playlist]
+  );
+
+  // Auto-play state (persisted in localStorage, default true for binge-watching)
+  const [autoPlayEnabled, setAutoPlayEnabled] = useState<boolean>(() => {
+    return localStorage.getItem('otimflix_autoplay_next') !== 'false';
+  });
+
+  const [showNextOverlay, setShowNextOverlay] = useState(false);
+  const [showEpisodeDrawer, setShowEpisodeDrawer] = useState(false);
+
+  const toggleAutoPlay = () => {
+    setAutoPlayEnabled((prev) => {
+      const next = !prev;
+      localStorage.setItem('otimflix_autoplay_next', String(next));
+      return next;
+    });
+  };
+
+  // Reset next overlay whenever the active playing item changes
+  useEffect(() => {
+    setShowNextOverlay(false);
+    setShowEpisodeDrawer(false);
+  }, [item.url, item.id]);
+
+  // Default to our dynamic in-browser HLS engine powered by Hls.js
   const [playbackMode, setPlaybackMode] = useState<PlaybackMode>('web-hls');
+
+  useEffect(() => {
+    setPlaybackMode('web-hls');
+  }, [item.url]);
 
   const [isPlaying, setIsPlaying] = useState(true);
   const [currentTime, setCurrentTime] = useState(0);
@@ -210,15 +270,22 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({ item, onClose }) => {
         video.play().catch(() => setIsPlaying(false));
       }, { once: true });
     } else {
-      // Direct stream fallback
+      // Native high-speed proxy stream (HTML5 Video with Range seeking)
       video.src = targetUrl;
       video.load();
-      video.addEventListener('loadeddata', () => {
+
+      const handleReady = () => {
         setIsLoading(false);
         video.play().catch(() => setIsPlaying(false));
-      }, { once: true });
+      };
+
+      video.addEventListener('canplay', handleReady, { once: true });
+      video.addEventListener('loadeddata', handleReady, { once: true });
+      video.addEventListener('loadedmetadata', handleReady, { once: true });
+
       video.addEventListener('error', () => {
-        if (playbackMode !== 'web-hls-transcode') {
+        console.warn('Native stream error, falling back to HLS transcode...');
+        if (playbackMode === 'proxy') {
           setPlaybackMode('web-hls-transcode');
         } else {
           setErrorMessage('Erro ao carregar vídeo na janela.');
@@ -244,11 +311,36 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({ item, onClose }) => {
     };
   }, [item.url, playbackMode, getTargetUrl]);
 
+  const handlePlayNext = useCallback(() => {
+    if (nextEpisode && onPlayItem) {
+      setShowNextOverlay(false);
+      onPlayItem(nextEpisode);
+    }
+  }, [nextEpisode, onPlayItem]);
+
+  const handlePlayPrev = useCallback(() => {
+    if (prevEpisode && onPlayItem) {
+      setShowNextOverlay(false);
+      onPlayItem(prevEpisode);
+    }
+  }, [prevEpisode, onPlayItem]);
+
+  const handleVideoEnded = () => {
+    setIsPlaying(false);
+    if (nextEpisode && autoPlayEnabled && onPlayItem) {
+      setShowNextOverlay(true);
+    }
+  };
+
   // Keyboard Shortcuts
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
-        if (document.fullscreenElement) {
+        if (showEpisodeDrawer) {
+          setShowEpisodeDrawer(false);
+        } else if (showNextOverlay) {
+          setShowNextOverlay(false);
+        } else if (document.fullscreenElement) {
           document.exitFullscreen().catch(() => {});
         } else {
           onClose();
@@ -264,12 +356,34 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({ item, onClose }) => {
         toggleMute();
       } else if (e.key === 'f' || e.key === 'F') {
         toggleFullscreen();
+      } else if ((e.key === 'n' || e.key === 'N') && nextEpisode) {
+        handlePlayNext();
+      } else if ((e.key === 'p' || e.key === 'P') && prevEpisode) {
+        handlePlayPrev();
+      } else if (e.key === 'e' || e.key === 'E') {
+        if (seriesEpisodes.length > 1) {
+          setShowEpisodeDrawer((prev) => !prev);
+        }
       }
     };
 
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [isPlaying, isMuted, isFullscreen, duration, mediaDuration]);
+  }, [
+    isPlaying,
+    isMuted,
+    isFullscreen,
+    duration,
+    mediaDuration,
+    nextEpisode,
+    prevEpisode,
+    seriesEpisodes.length,
+    showEpisodeDrawer,
+    showNextOverlay,
+    handlePlayNext,
+    handlePlayPrev,
+    onClose,
+  ]);
 
   // Effective duration calculation: prioritize real movie duration
   const effectiveDuration = mediaDuration > 0
@@ -442,11 +556,22 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({ item, onClose }) => {
             <ArrowLeft className="w-6 h-6" />
           </button>
           <div>
-            <h2 className="text-white font-bold text-base sm:text-xl drop-shadow line-clamp-1">
-              {item.rawTitle || item.title}
-            </h2>
-            <div className="flex items-center gap-2 text-xs text-zinc-400 flex-wrap">
-              <span>{item.group}</span>
+            <div className="flex items-center gap-2 flex-wrap">
+              <h2 className="text-white font-bold text-base sm:text-xl drop-shadow line-clamp-1">
+                {currentEpisodeInfo ? currentEpisodeInfo.seriesName : (item.rawTitle || item.title)}
+              </h2>
+              {currentEpisodeInfo && (
+                <span className="px-2 py-0.5 rounded bg-[#e50914] text-[11px] font-black uppercase tracking-wider text-white shadow-sm">
+                  {currentEpisodeInfo.formattedTag}
+                </span>
+              )}
+            </div>
+            <div className="flex items-center gap-2 text-xs text-zinc-400 flex-wrap mt-0.5">
+              {currentEpisodeInfo?.episodeTitle ? (
+                <span className="text-zinc-200 font-medium line-clamp-1">{currentEpisodeInfo.episodeTitle}</span>
+              ) : (
+                <span>{item.group}</span>
+              )}
               {item.year && (
                 <>
                   <span aria-hidden="true">·</span>
@@ -456,14 +581,32 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({ item, onClose }) => {
               <span aria-hidden="true">·</span>
               <span className="text-[#46d369] font-medium">{item.isSeries ? 'Série' : 'Filme'}</span>
 
+              {item.isSeries && (
+                <>
+                  <span aria-hidden="true">·</span>
+                  <button
+                    onClick={toggleAutoPlay}
+                    className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[11px] font-semibold cursor-pointer transition-colors ${
+                      autoPlayEnabled
+                        ? 'bg-amber-500/20 text-amber-300 border border-amber-500/30'
+                        : 'bg-zinc-800 text-zinc-400 hover:text-zinc-300'
+                    }`}
+                    title="Alternar reprodução automática de maratona"
+                  >
+                    <Flame className={`w-3 h-3 ${autoPlayEnabled ? 'fill-amber-400 text-amber-400' : 'text-zinc-400'}`} />
+                    <span>{autoPlayEnabled ? 'Maratona Ativa' : 'Maratona Pausada'}</span>
+                  </button>
+                </>
+              )}
+
               {/* Mode indicator badge */}
               <span aria-hidden="true">·</span>
               <div className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-zinc-800/90 text-[11px] font-medium border border-zinc-700">
                 <Sparkles className="w-3 h-3 text-[#e50914]" />
                 <span className="text-zinc-200">
-                  {playbackMode === 'web-hls' && 'Web Player (HLS Fluido + AAC)'}
+                  {playbackMode === 'proxy' && 'Player Nativo (Alta Velocidade)'}
+                  {playbackMode === 'web-hls' && 'Web Player HLS (Chunks)'}
                   {playbackMode === 'web-hls-transcode' && 'Web Player (H.264 Total)'}
-                  {playbackMode === 'proxy' && 'Proxy Direto'}
                   {playbackMode === 'direct' && 'Conexão Direta'}
                 </span>
               </div>
@@ -477,10 +620,10 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({ item, onClose }) => {
             <button
               onClick={() => setShowModeMenu(!showModeMenu)}
               className="flex items-center gap-1.5 px-3 py-1.5 rounded bg-zinc-800/90 hover:bg-zinc-700 text-xs font-semibold text-zinc-200 border border-zinc-700 cursor-pointer transition-colors shadow"
-              title="Trocar modo de compatibilidade de vídeo"
+              title="Trocar modo de reprodução de vídeo"
             >
               <Sliders className="w-3.5 h-3.5 text-zinc-400" />
-              <span className="hidden sm:inline">Modo Navegador</span>
+              <span className="hidden sm:inline">Modo Player</span>
             </button>
 
             {showModeMenu && (
@@ -491,6 +634,20 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({ item, onClose }) => {
                 <div className="px-2 py-1 font-bold text-zinc-400 border-b border-zinc-800 text-[10px] uppercase">
                   Modo de Reprodução Web
                 </div>
+
+                <button
+                  onClick={() => {
+                    setPlaybackMode('proxy');
+                    setShowModeMenu(false);
+                  }}
+                  className={`text-left px-2.5 py-2 rounded flex flex-col transition-colors cursor-pointer ${
+                    playbackMode === 'proxy' ? 'bg-[#e50914] text-white font-bold' : 'hover:bg-zinc-800 text-zinc-200'
+                  }`}
+                >
+                  <span>⚡ Player Nativo (Recomendado)</span>
+                  <span className="text-[10px] opacity-75 font-normal">Início imediato em MP4/VOD com aceleração gráfica.</span>
+                </button>
+
                 <button
                   onClick={() => {
                     setPlaybackMode('web-hls');
@@ -500,7 +657,7 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({ item, onClose }) => {
                     playbackMode === 'web-hls' ? 'bg-[#e50914] text-white font-bold' : 'hover:bg-zinc-800 text-zinc-200'
                   }`}
                 >
-                  <span>⚡ Web Player HLS (Recomendado)</span>
+                  <span>🔄 Web Player HLS</span>
                   <span className="text-[10px] opacity-75 font-normal">Streaming em chunks com áudio AAC estéreo.</span>
                 </button>
 
@@ -513,21 +670,8 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({ item, onClose }) => {
                     playbackMode === 'web-hls-transcode' ? 'bg-[#e50914] text-white font-bold' : 'hover:bg-zinc-800 text-zinc-200'
                   }`}
                 >
-                  <span>🖥️ Web Player H.264 Total</span>
-                  <span className="text-[10px] opacity-75 font-normal">Re-codificação de vídeo para navegadores antigos.</span>
-                </button>
-
-                <button
-                  onClick={() => {
-                    setPlaybackMode('proxy');
-                    setShowModeMenu(false);
-                  }}
-                  className={`text-left px-2.5 py-2 rounded flex flex-col transition-colors cursor-pointer ${
-                    playbackMode === 'proxy' ? 'bg-[#e50914] text-white font-bold' : 'hover:bg-zinc-800 text-zinc-200'
-                  }`}
-                >
-                  <span>🌐 Fluxo Original (Proxy)</span>
-                  <span className="text-[10px] opacity-75 font-normal">Sem conversão.</span>
+                  <span>🖥️ Modo H.264 Total</span>
+                  <span className="text-[10px] opacity-75 font-normal">Re-codificação de vídeo para formatos antigos.</span>
                 </button>
               </div>
             )}
@@ -561,21 +705,52 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({ item, onClose }) => {
             setIsLoading(false);
             setIsPlaying(true);
           }}
-          onEnded={() => setIsPlaying(false)}
+          onEnded={handleVideoEnded}
           className="w-full h-full object-contain"
         />
+
+        {/* Skip to Next Episode prompt (Netflix style: bottom right floating during ending / credits) */}
+        {nextEpisode && !showNextOverlay && effectiveDuration > 25 && effectiveDuration - currentTime <= 15 && currentTime > 10 && (
+          <div
+            className="absolute bottom-24 right-4 sm:right-8 z-30 animate-in fade-in slide-in-from-bottom-3 duration-300"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <button
+              onClick={handlePlayNext}
+              className="flex items-center gap-2.5 px-4 py-2.5 rounded-xl bg-white hover:bg-zinc-200 text-black font-extrabold text-xs uppercase tracking-wider shadow-2xl transition-all active:scale-95 cursor-pointer border border-white/40 ring-4 ring-black/40"
+              title="Pular créditos e assistir próximo episódio agora"
+            >
+              <SkipForward className="w-4 h-4 fill-black" />
+              <span>Próximo Episódio ({Math.max(1, Math.ceil(effectiveDuration - currentTime))}s)</span>
+            </button>
+          </div>
+        )}
+
+        {/* Auto-play Next Episode Countdown Overlay */}
+        {showNextOverlay && nextEpisode && (
+          <NextEpisodeOverlay
+            nextItem={nextEpisode}
+            countdownSeconds={5}
+            onPlayNext={handlePlayNext}
+            onCancel={() => setShowNextOverlay(false)}
+            onOpenEpisodesList={() => {
+              setShowNextOverlay(false);
+              setShowEpisodeDrawer(true);
+            }}
+          />
+        )}
 
         {/* Loading Spinner & Helper Controls */}
         {isLoading && !errorMessage && (
           <div className="absolute inset-0 flex flex-col items-center justify-center bg-black/75 backdrop-blur-xs z-10 p-4 text-center">
             <div className="w-14 h-14 border-4 border-zinc-700 border-t-[#e50914] rounded-full animate-spin mb-4" />
             <span className="text-zinc-200 text-sm font-semibold">
-              {loadingTime > 6 ? 'O servidor de IPTV está respondendo devagar...' : 'Iniciando transmissão no navegador...'}
+              {loadingTime > 6 ? 'O servidor de IPTV está demorando para entregar o vídeo...' : 'Carregando filme...'}
             </span>
             <span className="text-zinc-400 text-xs mt-1">
+              {playbackMode === 'proxy' && 'Transmitindo arquivo de vídeo diretamente (alta velocidade)'}
               {playbackMode === 'web-hls' && 'Convertendo áudio e preparando blocos de reprodução'}
               {playbackMode === 'web-hls-transcode' && 'Re-codificando vídeo e áudio em tempo real'}
-              {playbackMode === 'proxy' && 'Conectando ao stream do provedor'}
             </span>
 
             {loadingTime > 6 && (
@@ -583,12 +758,20 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({ item, onClose }) => {
                 className="mt-5 flex flex-wrap items-center justify-center gap-2 max-w-md animate-in fade-in"
                 onClick={(e) => e.stopPropagation()}
               >
+                {playbackMode !== 'proxy' && (
+                  <button
+                    onClick={() => setPlaybackMode('proxy')}
+                    className="px-3 py-1.5 rounded bg-[#e50914] hover:bg-[#b20710] text-xs font-semibold text-white transition-colors cursor-pointer shadow"
+                  >
+                    ⚡ Player Nativo (Proxy)
+                  </button>
+                )}
                 {playbackMode !== 'web-hls' && (
                   <button
                     onClick={() => setPlaybackMode('web-hls')}
                     className="px-3 py-1.5 rounded bg-zinc-800 hover:bg-zinc-700 text-xs font-semibold text-white border border-zinc-700 transition-colors cursor-pointer"
                   >
-                    ⚡ Modo HLS Rápido
+                    🔄 Modo HLS
                   </button>
                 )}
                 {playbackMode !== 'web-hls-transcode' && (
@@ -597,14 +780,6 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({ item, onClose }) => {
                     className="px-3 py-1.5 rounded bg-zinc-800 hover:bg-zinc-700 text-xs font-semibold text-white border border-zinc-700 transition-colors cursor-pointer"
                   >
                     🖥️ Modo H.264 Total
-                  </button>
-                )}
-                {playbackMode !== 'proxy' && (
-                  <button
-                    onClick={() => setPlaybackMode('proxy')}
-                    className="px-3 py-1.5 rounded bg-zinc-800 hover:bg-zinc-700 text-xs font-semibold text-white border border-zinc-700 transition-colors cursor-pointer"
-                  >
-                    🌐 Tentar Conexão Direta
                   </button>
                 )}
                 <button
@@ -753,6 +928,26 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({ item, onClose }) => {
               <span className="text-[9px] font-bold absolute top-1.5">10</span>
             </button>
 
+            {prevEpisode && (
+              <button
+                onClick={handlePlayPrev}
+                className="hover:text-white text-zinc-300 transition-colors p-1 flex items-center justify-center cursor-pointer"
+                title={`Episódio Anterior: ${prevEpisode.rawTitle || prevEpisode.title}`}
+              >
+                <SkipBack className="w-5 h-5" />
+              </button>
+            )}
+
+            {nextEpisode && (
+              <button
+                onClick={handlePlayNext}
+                className="hover:text-white text-[#ff5a5f] transition-colors p-1 flex items-center justify-center cursor-pointer group"
+                title={`Próximo Episódio: ${nextEpisode.rawTitle || nextEpisode.title}`}
+              >
+                <SkipForward className="w-5 h-5 fill-current" />
+              </button>
+            )}
+
             <div className="flex items-center gap-2">
               <button
                 onClick={toggleMute}
@@ -786,7 +981,43 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({ item, onClose }) => {
             </div>
           </div>
 
-          <div className="flex items-center gap-4">
+          <div className="flex items-center gap-2 sm:gap-3">
+            {/* Episodes List Drawer Button if series has multiple episodes */}
+            {seriesEpisodes.length > 1 && (
+              <button
+                onClick={() => setShowEpisodeDrawer(true)}
+                className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-zinc-800/80 hover:bg-zinc-700 text-xs font-semibold text-zinc-200 border border-zinc-700 cursor-pointer transition-colors shadow-sm"
+                title="Abrir lista de episódios da série"
+              >
+                <ListVideo className="w-3.5 h-3.5 text-zinc-300" />
+                <span className="hidden sm:inline">Episódios</span>
+                <span className="text-[10px] text-zinc-400 font-mono">({seriesEpisodes.length})</span>
+              </button>
+            )}
+
+            {/* Auto-play Marathon Toggle */}
+            {(nextEpisode || item.isSeries) && (
+              <button
+                onClick={toggleAutoPlay}
+                className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-semibold transition-all cursor-pointer border ${
+                  autoPlayEnabled
+                    ? 'bg-amber-500/20 hover:bg-amber-500/30 text-amber-300 border-amber-500/40 shadow-sm'
+                    : 'bg-zinc-800/80 hover:bg-zinc-700 text-zinc-400 border-zinc-700'
+                }`}
+                title={
+                  autoPlayEnabled
+                    ? 'Maratona Ativa: Próximo episódio inicia automaticamente ao final'
+                    : 'Maratona Pausada: Clique para ativar reprodução contínua'
+                }
+              >
+                <Flame className={`w-3.5 h-3.5 ${autoPlayEnabled ? 'fill-amber-400 text-amber-400' : 'text-zinc-500'}`} />
+                <span className="hidden sm:inline">Maratona</span>
+                <span className="text-[10px] font-bold uppercase tracking-wider">
+                  {autoPlayEnabled ? 'ON' : 'OFF'}
+                </span>
+              </button>
+            )}
+
             <button
               onClick={toggleFullscreen}
               className="hover:text-zinc-300 transition-colors p-1 focus:outline-none cursor-pointer"
@@ -797,6 +1028,17 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({ item, onClose }) => {
           </div>
         </div>
       </div>
+
+      {/* Episodes Drawer */}
+      <EpisodeDrawer
+        isOpen={showEpisodeDrawer}
+        onClose={() => setShowEpisodeDrawer(false)}
+        currentItem={item}
+        episodes={seriesEpisodes}
+        onSelectEpisode={(ep) => onPlayItem && onPlayItem(ep)}
+        autoPlayEnabled={autoPlayEnabled}
+        onToggleAutoPlay={toggleAutoPlay}
+      />
     </div>
   );
 };

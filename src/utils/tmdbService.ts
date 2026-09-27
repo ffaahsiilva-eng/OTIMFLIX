@@ -24,6 +24,16 @@ https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/TearsOfSteel.m
 https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/TearsOfSteel.mp4
 #EXTINF:-1 tvg-logo="https://image.tmdb.org/t/p/w500/49WJfeN0moxb9IPfGn8AIqMGskD.jpg" group-title="Séries",Stranger Things S04E01 - O Clube Hellfire [1080p]
 https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/WeAreGoingOnBullrun.mp4
+#EXTINF:-1 tvg-logo="https://image.tmdb.org/t/p/w500/49WJfeN0moxb9IPfGn8AIqMGskD.jpg" group-title="Séries",Stranger Things S04E02 - A Maldição de Vecna [1080p]
+https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ForBiggerBlazes.mp4
+#EXTINF:-1 tvg-logo="https://image.tmdb.org/t/p/w500/49WJfeN0moxb9IPfGn8AIqMGskD.jpg" group-title="Séries",Stranger Things S04E03 - O Monstro e a Super-heroína [1080p]
+https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/TearsOfSteel.mp4
+#EXTINF:-1 tvg-logo="https://image.tmdb.org/t/p/w500/49WJfeN0moxb9IPfGn8AIqMGskD.jpg" group-title="Séries",Stranger Things S04E04 - Querido Billy [1080p]
+https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ElephantsDream.mp4
+#EXTINF:-1 tvg-logo="https://image.tmdb.org/t/p/w500/uKvVjHNqB5VmOrdxqAt2V7JMrne.jpg" group-title="Séries",The Last of Us S01E01 - Quando Você Estiver Perdido na Escuridão [4K]
+https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4
+#EXTINF:-1 tvg-logo="https://image.tmdb.org/t/p/w500/uKvVjHNqB5VmOrdxqAt2V7JMrne.jpg" group-title="Séries",The Last of Us S01E02 - Infectados [4K]
+https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/TearsOfSteel.mp4
 #EXTINF:-1 tvg-logo="https://image.tmdb.org/t/p/w500/qJ2tW6WMUDux911BTUgMe1I0eit.jpg" group-title="Ação & Aventura",Batman: O Cavaleiro das Trevas (2008) [4K UHD]
 https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ForBiggerBlazes.mp4
 #EXTINF:-1 tvg-logo="https://image.tmdb.org/t/p/w500/w9kR8qbmQ01HwnvK4alvnQ2ca0L.jpg" group-title="Animação",Toy Story 4 (2019) [1080p Dublado]

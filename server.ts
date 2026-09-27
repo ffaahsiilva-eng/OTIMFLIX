@@ -1,4 +1,5 @@
 import express from 'express';
+import compression from 'compression';
 import { createServer as createViteServer } from 'vite';
 import path from 'path';
 import zlib from 'zlib';
@@ -9,11 +10,16 @@ import { spawn, ChildProcess } from 'child_process';
 // Allow self-signed or private certificates commonly used by IPTV servers
 process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
 
+export const DEFAULT_M3U_URL = 'http://clipper.lat/get.php?username=jeandryo001&password=622685774&type=m3u_plus&output=mpegts';
+
 const app = express();
 const PORT = Number(process.env.PORT) || 3000;
 
-app.use(express.json({ limit: '50mb' }));
-app.use(express.urlencoded({ extended: true, limit: '50mb' }));
+// Enable gzip/deflate compression for fast transfer of playlists and assets
+app.use(compression());
+
+app.use(express.json({ limit: '100mb' }));
+app.use(express.urlencoded({ extended: true, limit: '100mb' }));
 
 // CORS middleware for API endpoints
 app.use('/api', (req, res, next) => {
@@ -25,6 +31,11 @@ app.use('/api', (req, res, next) => {
   }
   next();
 });
+
+const M3U_CACHE_DIR = '/tmp/m3u_cache';
+if (!fs.existsSync(M3U_CACHE_DIR)) {
+  fs.mkdirSync(M3U_CACHE_DIR, { recursive: true });
+}
 
 const USER_AGENTS = [
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36',
@@ -49,9 +60,19 @@ function decompressBuffer(buf: Buffer): string {
   return buf.toString('utf-8');
 }
 
+// Default playlist endpoint for instant access
+app.get('/api/default-playlist', async (req, res) => {
+  req.query.url = DEFAULT_M3U_URL;
+  return handleProxyM3U(req, res);
+});
+
 // Proxy endpoint to fetch remote M3U playlists bypassing browser CORS and Mixed Content (HTTP/HTTPS)
-app.get('/api/proxy-m3u', async (req, res) => {
-  const targetUrl = req.query.url as string;
+app.get('/api/proxy-m3u', handleProxyM3U);
+
+async function handleProxyM3U(req: express.Request, res: express.Response) {
+  const targetUrl = (req.query.url as string) || DEFAULT_M3U_URL;
+  const forceRefresh = req.query.refresh === 'true' || req.query.refresh === '1';
+
   if (!targetUrl) {
     return res.status(400).json({ error: 'URL da lista M3U é obrigatória.' });
   }
@@ -62,13 +83,32 @@ app.get('/api/proxy-m3u', async (req, res) => {
       return res.status(400).json({ error: 'Protocolo inválido. Use HTTP ou HTTPS.' });
     }
 
+    const urlHash = crypto.createHash('md5').update(targetUrl.trim()).digest('hex');
+    const cacheFilePath = path.join(M3U_CACHE_DIR, `${urlHash}.m3u`);
+
+    // Check disk cache (valid for 6 hours unless forceRefresh requested)
+    if (!forceRefresh && fs.existsSync(cacheFilePath)) {
+      try {
+        const stats = fs.statSync(cacheFilePath);
+        const ageHours = (Date.now() - stats.mtimeMs) / (1000 * 60 * 60);
+        if (ageHours < 6 && stats.size > 100) {
+          res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+          res.setHeader('X-Cache', 'HIT');
+          const readStream = fs.createReadStream(cacheFilePath);
+          return readStream.pipe(res);
+        }
+      } catch (cacheErr) {
+        console.warn('Error reading cache file:', cacheErr);
+      }
+    }
+
     let lastError: any = null;
     let finalBuffer: Buffer | null = null;
 
     // Try with rotating user agents if the provider blocks specific clients
     for (const ua of USER_AGENTS) {
       const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), 45000); // 45s timeout for large playlists
+      const timeout = setTimeout(() => controller.abort(), 60000); // 60s timeout for large playlists
 
       try {
         const response = await fetch(targetUrl, {
@@ -87,7 +127,6 @@ app.get('/api/proxy-m3u', async (req, res) => {
           finalBuffer = Buffer.from(arrayBuf);
           break; // Success!
         } else if (response.status === 403 || response.status === 401) {
-          // Provider rejected this User-Agent, try next one
           lastError = new Error(`HTTP ${response.status} (${response.statusText})`);
           continue;
         } else {
@@ -100,17 +139,30 @@ app.get('/api/proxy-m3u', async (req, res) => {
     }
 
     if (!finalBuffer) {
+      // Fallback: If network fetch failed but cache exists (even if older than 6h), serve cache!
+      if (fs.existsSync(cacheFilePath)) {
+        res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+        res.setHeader('X-Cache', 'STALE-FALLBACK');
+        return fs.createReadStream(cacheFilePath).pipe(res);
+      }
+
       const isTimeout = lastError?.name === 'AbortError';
       return res.status(500).json({
         error: isTimeout
-          ? 'Tempo limite esgotado ao tentar baixar a lista do servidor remoto (timeout de 45s).'
+          ? 'Tempo limite esgotado ao tentar baixar a lista do servidor remoto (timeout).'
           : `Erro ao conectar com o servidor da lista: ${lastError?.message || 'Falha de rede ou servidor inacessível.'}`,
       });
     }
 
     const text = decompressBuffer(finalBuffer);
 
+    // Save to cache asynchronously
+    fs.writeFile(cacheFilePath, text, 'utf-8', (err) => {
+      if (err) console.error('Failed to cache M3U file:', err);
+    });
+
     res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+    res.setHeader('X-Cache', 'MISS');
     return res.send(text);
   } catch (err: any) {
     console.error('Error fetching M3U:', err?.message);
@@ -118,7 +170,7 @@ app.get('/api/proxy-m3u', async (req, res) => {
       error: `Erro ao processar URL da lista: ${err?.message || 'Falha de rede.'}`,
     });
   }
-});
+}
 
 // Proxy stream endpoint for video playback (bypasses browser CORS & mixed content)
 app.get('/api/proxy-stream', async (req, res) => {
@@ -164,12 +216,12 @@ app.get('/api/proxy-stream', async (req, res) => {
 
     const contentLength = response.headers.get('content-length');
     const contentRange = response.headers.get('content-range');
-    const acceptRanges = response.headers.get('accept-ranges') || 'bytes';
 
     res.status(response.status);
     res.setHeader('Content-Type', contentType);
-    res.setHeader('Accept-Ranges', acceptRanges);
+    res.setHeader('Accept-Ranges', 'bytes');
     res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Access-Control-Allow-Methods', 'GET, HEAD, OPTIONS');
     res.setHeader('Access-Control-Allow-Headers', 'Range, Content-Type, Accept');
     res.setHeader('Access-Control-Expose-Headers', 'Content-Range, Content-Length, Accept-Ranges');
 
@@ -271,8 +323,7 @@ app.get('/api/live-hls/master.m3u8', async (req, res) => {
       '-reconnect_delay_max', '3',
       '-rw_timeout', '15000000',
       '-timeout', '15000000',
-      '-buffer_size', '10485760',
-      '-headers', 'User-Agent: VLC/3.0.18 LibVLC/3.0.18\r\nAccept: */*\r\n',
+      '-user_agent', 'IPTVSmarters/1.0.0 (Linux; Android 10)',
     ];
 
     if (seek > 0) {
@@ -306,7 +357,7 @@ app.get('/api/live-hls/master.m3u8', async (req, res) => {
 
     ffmpegArgs.push(
       '-f', 'hls',
-      '-hls_time', '6',
+      '-hls_time', '4',
       '-hls_list_size', '0',
       '-hls_playlist_type', 'event',
       '-hls_segment_filename', segmentPattern,
@@ -429,7 +480,7 @@ app.get('/api/media-duration', (req, res) => {
     '-v', 'error',
     '-rw_timeout', '5000000',
     '-timeout', '5000000',
-    '-headers', 'User-Agent: VLC/3.0.18 LibVLC/3.0.18\r\nAccept: */*\r\n',
+    '-user_agent', 'IPTVSmarters/1.0.0 (Linux; Android 10)',
     '-show_entries', 'format=duration:stream=duration',
     '-of', 'default=noprint_wrappers=1:nokey=1',
     streamUrl,

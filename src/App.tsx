@@ -16,12 +16,12 @@ import { Toast } from './components/Toast';
 import { CategoryBar } from './components/CategoryBar';
 import { parseM3UAsync } from './utils/m3uParser';
 import { batchEnrichItems, CURATED_DEMO_M3U } from './utils/tmdbService';
-import { fetchRemoteM3U } from './utils/fetchPlaylist';
+import { fetchRemoteM3U, DEFAULT_M3U_URL } from './utils/fetchPlaylist';
 import { M3UItem, SavedListEntry } from './types/m3u';
 
 export default function App() {
-  const [viewState, setViewState] = useState<'welcome' | 'loading' | 'app'>('welcome');
-  const [loadingText, setLoadingText] = useState('Analisando lista M3U...');
+  const [viewState, setViewState] = useState<'welcome' | 'loading' | 'app'>('loading');
+  const [loadingText, setLoadingText] = useState('Carregando catálogo principal...');
   const [loadingProgress, setLoadingProgress] = useState(0);
   const [loadingTotal, setLoadingTotal] = useState(0);
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -197,8 +197,8 @@ export default function App() {
     processM3UText(content, fileName);
   };
 
-  // Load from URL with robust fallback and proxy
-  const handleLoadUrl = async (url: string) => {
+  // Load from URL with robust fallback, disk cache, and proxy
+  const handleLoadUrl = async (url: string, customName?: string) => {
     setLoadError(null);
     setViewState('loading');
     setLoadingText('Conectando ao servidor da lista...');
@@ -207,7 +207,9 @@ export default function App() {
 
     try {
       const text = await fetchRemoteM3U(url, (status) => setLoadingText(status));
-      const listName = url.split('/').pop()?.split('?')[0] || 'Lista Remota';
+      const listName =
+        customName ||
+        (url === DEFAULT_M3U_URL ? 'Lista Principal' : url.split('/').pop()?.split('?')[0] || 'Lista Remota');
       await processM3UText(text, listName, url);
     } catch (err: any) {
       setViewState('welcome');
@@ -216,6 +218,11 @@ export default function App() {
       showToast(`Falha ao baixar lista remota: ${msg}`, 'info');
     }
   };
+
+  // Automatically load the default main M3U playlist on page load so it goes directly to the catalog
+  useEffect(() => {
+    handleLoadUrl(DEFAULT_M3U_URL, 'Lista Principal');
+  }, []);
 
   // Load Curated Demo
   const handleLoadDemo = () => {
@@ -507,6 +514,7 @@ export default function App() {
           onToggleFavorite={handleToggleFavorite}
           isLiked={likes.includes(selectedItem.id)}
           onToggleLike={handleToggleLike}
+          playlist={allItems}
         />
       )}
 
@@ -514,6 +522,8 @@ export default function App() {
       {playingItem && (
         <VideoPlayer
           item={playingItem}
+          playlist={allItems}
+          onPlayItem={handlePlayItem}
           onClose={() => setPlayingItem(null)}
         />
       )}

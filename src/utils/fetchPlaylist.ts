@@ -7,68 +7,78 @@ export async function fetchRemoteM3U(
   onStatusUpdate?: (status: string) => void
 ): Promise<string> {
   const cleanUrl = url.trim();
+  let detailedError = '';
 
-  // Strategy 1: Local Backend Proxy (server.ts) with IPTV User-Agent & timeout
+  // Strategy 1: Local Backend Proxy (server.ts) with decompress & User-Agent rotation
   try {
-    if (onStatusUpdate) onStatusUpdate('Baixando via servidor proxy interno...');
+    if (onStatusUpdate) onStatusUpdate('Baixando lista via servidor proxy...');
     const proxyEndpoint = `/api/proxy-m3u?url=${encodeURIComponent(cleanUrl)}`;
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 35000);
+    const timeout = setTimeout(() => controller.abort(), 45000);
 
     const response = await fetch(proxyEndpoint, { signal: controller.signal });
     clearTimeout(timeout);
 
     if (response.ok) {
       const text = await response.text();
-      if (text && text.includes('#EXT')) {
+      if (text && (text.includes('#EXT') || text.includes('http') || text.length > 50)) {
         return text;
       }
-    }
-  } catch (err) {
-    console.warn('Backend proxy attempt failed, trying fallback CORS proxies...', err);
-  }
-
-  // Strategy 2: AllOrigins CORS proxy
-  try {
-    if (onStatusUpdate) onStatusUpdate('Tentando proxy de contingência (AllOrigins)...');
-    const proxyUrl = `https://api.allorigins.win/raw?url=${encodeURIComponent(cleanUrl)}`;
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 20000);
-
-    const response = await fetch(proxyUrl, { signal: controller.signal });
-    clearTimeout(timeout);
-
-    if (response.ok) {
-      const text = await response.text();
-      if (text && text.includes('#EXT')) {
-        return text;
+    } else {
+      try {
+        const errorJson = await response.json();
+        if (errorJson?.error) {
+          detailedError = errorJson.error;
+        }
+      } catch (e) {
+        // Not JSON
       }
     }
-  } catch (err) {
-    console.warn('AllOrigins failed, trying CorsProxy.io...', err);
+  } catch (err: any) {
+    console.warn('Local proxy failed, trying external CORS proxies...', err);
   }
 
-  // Strategy 3: CorsProxy.io
+  // Strategy 2: CorsProxy.io
   try {
-    if (onStatusUpdate) onStatusUpdate('Tentando proxy de contingência (CorsProxy)...');
+    if (onStatusUpdate) onStatusUpdate('Tentando rota alternativa de conexão...');
     const proxyUrl = `https://corsproxy.io/?url=${encodeURIComponent(cleanUrl)}`;
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 20000);
+    const timeout = setTimeout(() => controller.abort(), 25000);
 
     const response = await fetch(proxyUrl, { signal: controller.signal });
     clearTimeout(timeout);
 
     if (response.ok) {
       const text = await response.text();
-      if (text && text.includes('#EXT')) {
+      if (text && (text.includes('#EXT') || text.includes('http') || text.length > 50)) {
         return text;
       }
     }
   } catch (err) {
-    console.warn('CorsProxy failed, trying direct browser fetch...', err);
+    console.warn('CorsProxy.io failed, trying AllOrigins...', err);
   }
 
-  // Strategy 4: Direct browser fetch (works if provider enables CORS or for local IPs)
+  // Strategy 3: AllOrigins
+  try {
+    if (onStatusUpdate) onStatusUpdate('Tentando rota AllOrigins...');
+    const proxyUrl = `https://api.allorigins.win/raw?url=${encodeURIComponent(cleanUrl)}`;
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 25000);
+
+    const response = await fetch(proxyUrl, { signal: controller.signal });
+    clearTimeout(timeout);
+
+    if (response.ok) {
+      const text = await response.text();
+      if (text && (text.includes('#EXT') || text.includes('http') || text.length > 50)) {
+        return text;
+      }
+    }
+  } catch (err) {
+    console.warn('AllOrigins failed, trying direct browser connection...', err);
+  }
+
+  // Strategy 4: Direct browser connection (works if CORS is allowed)
   try {
     if (onStatusUpdate) onStatusUpdate('Tentando conexão direta...');
     const controller = new AbortController();
@@ -79,15 +89,18 @@ export async function fetchRemoteM3U(
 
     if (response.ok) {
       const text = await response.text();
-      if (text && text.includes('#EXT')) {
+      if (text && (text.includes('#EXT') || text.includes('http') || text.length > 50)) {
         return text;
       }
     }
   } catch (err) {
-    console.warn('Direct fetch failed.', err);
+    console.warn('Direct connection failed.', err);
   }
 
-  throw new Error(
-    'Não foi possível baixar a lista diretamente devido a bloqueio de CORS ou restrição do provedor da lista.'
-  );
+  // If all strategies failed, throw informative error
+  const finalMessage = detailedError
+    ? detailedError
+    : 'O servidor do seu provedor de IPTV bloqueou o download em nuvem (muitos provedores limitam o acesso apenas para o seu IP residencial ou exigem download local).';
+
+  throw new Error(finalMessage);
 }

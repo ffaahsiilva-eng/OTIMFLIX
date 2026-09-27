@@ -12,6 +12,7 @@ import {
   AlertCircle,
   HelpCircle,
   Copy,
+  Download,
 } from 'lucide-react';
 import { SavedListEntry } from '../types/m3u';
 
@@ -81,7 +82,14 @@ export const WelcomeScreen: React.FC<WelcomeScreenProps> = ({
   const handleUrlSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     if (urlInput.trim()) {
+      if (onClearError) onClearError();
       onLoadUrl(urlInput.trim());
+    }
+  };
+
+  const handleDownloadDirectly = () => {
+    if (urlInput.trim()) {
+      window.open(urlInput.trim(), '_blank');
     }
   };
 
@@ -113,37 +121,49 @@ export const WelcomeScreen: React.FC<WelcomeScreenProps> = ({
 
       {/* Error Callout if any */}
       {errorMessage && (
-        <div className="w-full max-w-xl mb-6 p-4 rounded-xl bg-red-950/70 border border-red-800/80 text-white flex flex-col gap-2 animate-in fade-in">
+        <div className="w-full max-w-xl mb-6 p-4 sm:p-5 rounded-xl bg-red-950/80 border border-red-800 text-white flex flex-col gap-3 animate-in fade-in shadow-xl">
           <div className="flex items-start gap-3">
             <AlertCircle className="w-5 h-5 text-[#e50914] shrink-0 mt-0.5" />
             <div className="flex-1 text-xs sm:text-sm">
-              <p className="font-bold text-red-200">Não foi possível baixar diretamente desta URL</p>
+              <p className="font-bold text-red-200 text-sm">Não foi possível baixar diretamente desta URL</p>
               <p className="text-zinc-300 mt-1 leading-relaxed">{errorMessage}</p>
             </div>
             {onClearError && (
               <button
                 onClick={onClearError}
-                className="text-zinc-400 hover:text-white text-xs p-1"
+                className="text-zinc-400 hover:text-white text-xs p-1 cursor-pointer"
+                title="Fechar aviso"
               >
                 ✕
               </button>
             )}
           </div>
 
-          <div className="flex items-center gap-3 pt-2 border-t border-red-900/60 text-xs">
-            <span className="text-zinc-400">Soluções rápidas:</span>
+          <div className="flex flex-wrap items-center gap-2 pt-2 border-t border-red-900/60 text-xs">
             <button
-              onClick={() => setActiveTab('paste-text')}
-              className="text-white underline font-semibold hover:text-red-300"
+              onClick={handleDownloadDirectly}
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded bg-white text-black font-bold hover:bg-zinc-200 transition-colors cursor-pointer"
             >
-              1. Colar o texto M3U
+              <Download className="w-3.5 h-3.5" />
+              <span>Baixar Lista no Dispositivo</span>
             </button>
-            <span className="text-zinc-500">ou</span>
+
             <button
-              onClick={() => setShowCorsHelp(true)}
-              className="text-red-300 underline hover:text-white"
+              onClick={() => {
+                setActiveTab('paste-text');
+                if (onClearError) onClearError();
+              }}
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded bg-zinc-800 hover:bg-zinc-700 text-white font-semibold transition-colors cursor-pointer"
             >
-              Ver como salvar o arquivo .m3u
+              <FileText className="w-3.5 h-3.5 text-[#e50914]" />
+              <span>Colar Conteúdo M3U</span>
+            </button>
+
+            <button
+              onClick={() => handleUrlSubmit({ preventDefault: () => {} } as any)}
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded bg-red-900/60 hover:bg-red-900 text-white font-semibold transition-colors cursor-pointer ml-auto"
+            >
+              <span>Tentar Novamente</span>
             </button>
           </div>
         </div>

@@ -1,6 +1,10 @@
 import express from 'express';
 import { createServer as createViteServer } from 'vite';
 import path from 'path';
+import zlib from 'zlib';
+
+// Allow self-signed or private certificates commonly used by IPTV servers
+process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
 
 const app = express();
 const PORT = Number(process.env.PORT) || 3000;
@@ -12,12 +16,35 @@ app.use(express.urlencoded({ extended: true, limit: '50mb' }));
 app.use('/api', (req, res, next) => {
   res.header('Access-Control-Allow-Origin', '*');
   res.header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
-  res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+  res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization, Range');
   if (req.method === 'OPTIONS') {
     return res.sendStatus(200);
   }
   next();
 });
+
+const USER_AGENTS = [
+  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36',
+  'VLC/3.0.18 LibVLC/3.0.18',
+  'IPTVSmarters/1.0.0 (Linux; Android 10)',
+  'TiviMate/4.7.0 (Linux; Android 11)',
+];
+
+function decompressBuffer(buf: Buffer): string {
+  try {
+    // Check gzip magic bytes 0x1f 0x8b
+    if (buf.length >= 2 && buf[0] === 0x1f && buf[1] === 0x8b) {
+      return zlib.gunzipSync(buf).toString('utf-8');
+    }
+    // Check deflate magic bytes 0x78
+    if (buf.length >= 2 && buf[0] === 0x78) {
+      return zlib.inflateSync(buf).toString('utf-8');
+    }
+  } catch (e) {
+    // Fall back to direct string if decompression fails
+  }
+  return buf.toString('utf-8');
+}
 
 // Proxy endpoint to fetch remote M3U playlists bypassing browser CORS and Mixed Content (HTTP/HTTPS)
 app.get('/api/proxy-m3u', async (req, res) => {
@@ -32,38 +59,60 @@ app.get('/api/proxy-m3u', async (req, res) => {
       return res.status(400).json({ error: 'Protocolo inválido. Use HTTP ou HTTPS.' });
     }
 
-    // Standard IPTV User-Agents to prevent provider blocking
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 35000); // 35s timeout for large playlists
+    let lastError: any = null;
+    let finalBuffer: Buffer | null = null;
 
-    const response = await fetch(targetUrl, {
-      signal: controller.signal,
-      headers: {
-        'User-Agent': 'IPTVSmarters/1.0.0 (Linux; Android 10) VLC/3.0.18',
-        'Accept': '*/*',
-        'Accept-Encoding': 'gzip, deflate',
-      },
-    });
+    // Try with rotating user agents if the provider blocks specific clients
+    for (const ua of USER_AGENTS) {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 45000); // 45s timeout for large playlists
 
-    clearTimeout(timeout);
+      try {
+        const response = await fetch(targetUrl, {
+          signal: controller.signal,
+          redirect: 'follow',
+          headers: {
+            'User-Agent': ua,
+            'Accept': '*/*',
+          },
+        });
 
-    if (!response.ok) {
-      return res.status(response.status).json({
-        error: `O servidor da lista respondeu com status HTTP ${response.status} (${response.statusText}).`,
+        clearTimeout(timeout);
+
+        if (response.ok) {
+          const arrayBuf = await response.arrayBuffer();
+          finalBuffer = Buffer.from(arrayBuf);
+          break; // Success!
+        } else if (response.status === 403 || response.status === 401) {
+          // Provider rejected this User-Agent, try next one
+          lastError = new Error(`HTTP ${response.status} (${response.statusText})`);
+          continue;
+        } else {
+          lastError = new Error(`HTTP ${response.status} (${response.statusText})`);
+        }
+      } catch (err: any) {
+        clearTimeout(timeout);
+        lastError = err;
+      }
+    }
+
+    if (!finalBuffer) {
+      const isTimeout = lastError?.name === 'AbortError';
+      return res.status(500).json({
+        error: isTimeout
+          ? 'Tempo limite esgotado ao tentar baixar a lista do servidor remoto (timeout de 45s).'
+          : `Erro ao conectar com o servidor da lista: ${lastError?.message || 'Falha de rede ou servidor inacessível.'}`,
       });
     }
 
-    const text = await response.text();
+    const text = decompressBuffer(finalBuffer);
 
     res.setHeader('Content-Type', 'text/plain; charset=utf-8');
     return res.send(text);
   } catch (err: any) {
     console.error('Error fetching M3U:', err?.message);
-    const isTimeout = err?.name === 'AbortError';
     return res.status(500).json({
-      error: isTimeout
-        ? 'Tempo limite esgotado ao tentar baixar a lista do servidor remoto (timeout de 35s).'
-        : `Erro ao conectar com o servidor da lista: ${err?.message || 'Falha de rede.'}`,
+      error: `Erro ao processar URL da lista: ${err?.message || 'Falha de rede.'}`,
     });
   }
 });

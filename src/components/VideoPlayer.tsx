@@ -48,11 +48,28 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({ item, onClose }) => {
   const [showModeMenu, setShowModeMenu] = useState(false);
   const [isLoading, setIsLoading] = useState(true);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [loadingTime, setLoadingTime] = useState(0);
   const [copied, setCopied] = useState(false);
   const [hoverTime, setHoverTime] = useState<number | null>(null);
   const [hoverPosition, setHoverPosition] = useState<number>(0);
 
   const idleTimerRef = useRef<any>(null);
+  const networkErrorsRef = useRef<number>(0);
+
+  // Monitor loading time
+  useEffect(() => {
+    let interval: any = null;
+    if (isLoading && !errorMessage) {
+      interval = setInterval(() => {
+        setLoadingTime((prev) => prev + 1);
+      }, 1000);
+    } else {
+      setLoadingTime(0);
+    }
+    return () => {
+      if (interval) clearInterval(interval);
+    };
+  }, [isLoading, errorMessage]);
 
   // Auto-hide controls
   const handleMouseMove = () => {
@@ -122,9 +139,15 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({ item, onClose }) => {
         if (data.fatal) {
           switch (data.type) {
             case Hls.ErrorTypes.NETWORK_ERROR:
-              // If standard web-hls fails, escalate to full H.264 transcode
+              networkErrorsRef.current++;
               if (playbackMode === 'web-hls') {
                 setPlaybackMode('web-hls-transcode');
+                return;
+              }
+              if (networkErrorsRef.current > 2) {
+                setErrorMessage('O servidor de IPTV demorou para responder ou rejeitou o stream em nuvem.');
+                setIsLoading(false);
+                hls.destroy();
                 return;
               }
               hls.startLoad();
@@ -467,14 +490,57 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({ item, onClose }) => {
           className="w-full h-full object-contain"
         />
 
-        {/* Loading Spinner */}
+        {/* Loading Spinner & Helper Controls */}
         {isLoading && !errorMessage && (
-          <div className="absolute inset-0 flex flex-col items-center justify-center bg-black/60 backdrop-blur-xs z-10 pointer-events-none">
+          <div className="absolute inset-0 flex flex-col items-center justify-center bg-black/75 backdrop-blur-xs z-10 p-4 text-center">
             <div className="w-14 h-14 border-4 border-zinc-700 border-t-[#e50914] rounded-full animate-spin mb-4" />
             <span className="text-zinc-200 text-sm font-semibold">
-              Iniciando transmissão no navegador...
+              {loadingTime > 6 ? 'O servidor de IPTV está respondendo devagar...' : 'Iniciando transmissão no navegador...'}
             </span>
-            <span className="text-zinc-400 text-xs mt-1">Carregando segmentos de vídeo</span>
+            <span className="text-zinc-400 text-xs mt-1">
+              {playbackMode === 'web-hls' && 'Convertendo áudio e preparando blocos de reprodução'}
+              {playbackMode === 'web-hls-transcode' && 'Re-codificando vídeo e áudio em tempo real'}
+              {playbackMode === 'proxy' && 'Conectando ao stream do provedor'}
+            </span>
+
+            {loadingTime > 6 && (
+              <div
+                className="mt-5 flex flex-wrap items-center justify-center gap-2 max-w-md animate-in fade-in"
+                onClick={(e) => e.stopPropagation()}
+              >
+                {playbackMode !== 'web-hls' && (
+                  <button
+                    onClick={() => setPlaybackMode('web-hls')}
+                    className="px-3 py-1.5 rounded bg-zinc-800 hover:bg-zinc-700 text-xs font-semibold text-white border border-zinc-700 transition-colors cursor-pointer"
+                  >
+                    ⚡ Modo HLS Rápido
+                  </button>
+                )}
+                {playbackMode !== 'web-hls-transcode' && (
+                  <button
+                    onClick={() => setPlaybackMode('web-hls-transcode')}
+                    className="px-3 py-1.5 rounded bg-zinc-800 hover:bg-zinc-700 text-xs font-semibold text-white border border-zinc-700 transition-colors cursor-pointer"
+                  >
+                    🖥️ Modo H.264 Total
+                  </button>
+                )}
+                {playbackMode !== 'proxy' && (
+                  <button
+                    onClick={() => setPlaybackMode('proxy')}
+                    className="px-3 py-1.5 rounded bg-zinc-800 hover:bg-zinc-700 text-xs font-semibold text-white border border-zinc-700 transition-colors cursor-pointer"
+                  >
+                    🌐 Tentar Conexão Direta
+                  </button>
+                )}
+                <button
+                  onClick={handleOpenVlc}
+                  className="px-3 py-1.5 rounded bg-amber-500/20 hover:bg-amber-500/30 text-xs font-semibold text-amber-300 border border-amber-500/30 transition-colors cursor-pointer"
+                >
+                  <Tv className="w-3 h-3 inline mr-1" />
+                  Abrir no VLC
+                </button>
+              </div>
+            )}
           </div>
         )}
 

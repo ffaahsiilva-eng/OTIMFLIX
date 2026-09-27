@@ -263,12 +263,12 @@ app.get('/api/live-hls/master.m3u8', async (req, res) => {
 
     const ffmpegArgs: string[] = [
       '-hide_banner',
-      '-loglevel', 'error',
+      '-loglevel', 'warning',
       '-reconnect', '1',
-      '-reconnect_at_eof', '1',
       '-reconnect_streamed', '1',
       '-reconnect_delay_max', '5',
-      '-headers', 'User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36\r\nAccept: */*\r\n',
+      '-timeout', '15000000',
+      '-headers', 'User-Agent: VLC/3.0.18 LibVLC/3.0.18\r\nAccept: */*\r\n',
       '-i', streamUrl,
     ];
 
@@ -297,15 +297,23 @@ app.get('/api/live-hls/master.m3u8', async (req, res) => {
 
     ffmpegArgs.push(
       '-f', 'hls',
-      '-hls_time', '3',
+      '-hls_time', '2',
       '-hls_list_size', '15',
       '-hls_flags', 'delete_segments+temp_file',
       '-hls_segment_filename', segmentPattern,
       playlistPath
     );
 
+    let lastStderr = '';
     const proc = spawn('ffmpeg', ffmpegArgs, {
-      stdio: ['ignore', 'pipe', 'pipe'],
+      stdio: ['ignore', 'ignore', 'pipe'],
+    });
+
+    proc.stderr?.on('data', (chunk) => {
+      lastStderr += chunk.toString();
+      if (lastStderr.length > 2000) {
+        lastStderr = lastStderr.slice(-2000);
+      }
     });
 
     session = {
@@ -316,20 +324,22 @@ app.get('/api/live-hls/master.m3u8', async (req, res) => {
     hlsSessions.set(sessionId, session);
 
     proc.on('error', (err) => {
-      console.error(`FFmpeg HLS error (${sessionId}):`, err.message);
+      console.error(`FFmpeg HLS spawn error (${sessionId}):`, err.message);
     });
 
-    proc.on('close', () => {
-      // FFmpeg finished or exited
+    proc.on('close', (code) => {
+      if (code !== 0 && code !== null) {
+        console.warn(`FFmpeg exited with code ${code} (${sessionId}):`, lastStderr.slice(-300));
+      }
     });
   } else {
     session.lastAccess = Date.now();
   }
 
-  // Wait for playlist to have at least 1 segment ready
+  // Wait for playlist to have at least 1 segment ready (up to 14s)
   const playlistPath = path.join(sessionDir, 'playlist.m3u8');
   const startWait = Date.now();
-  while (Date.now() - startWait < 8000) {
+  while (Date.now() - startWait < 14000) {
     if (fs.existsSync(playlistPath)) {
       try {
         const content = fs.readFileSync(playlistPath, 'utf-8');
@@ -343,10 +353,16 @@ app.get('/api/live-hls/master.m3u8', async (req, res) => {
         }
       } catch (e) {}
     }
-    await new Promise((r) => setTimeout(r, 200));
+
+    // If FFmpeg exited with error, don't keep waiting
+    if (session.process.exitCode !== null && session.process.exitCode !== 0) {
+      break;
+    }
+
+    await new Promise((r) => setTimeout(r, 250));
   }
 
-  return res.status(504).send('Tempo limite esgotado ao aguardar o fluxo de vídeo.');
+  return res.status(504).send('Tempo limite ao conectar com o provedor de IPTV.');
 });
 
 // Serve HLS segments (.ts)

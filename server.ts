@@ -2,7 +2,9 @@ import express from 'express';
 import { createServer as createViteServer } from 'vite';
 import path from 'path';
 import zlib from 'zlib';
-import { spawn } from 'child_process';
+import fs from 'fs';
+import crypto from 'crypto';
+import { spawn, ChildProcess } from 'child_process';
 
 // Allow self-signed or private certificates commonly used by IPTV servers
 process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
@@ -209,6 +211,164 @@ app.get('/api/proxy-stream', async (req, res) => {
       res.end();
     }
   }
+});
+
+// Dynamic HLS transcoding engine for 100% guaranteed in-browser playback
+interface HlsSession {
+  process: ChildProcess;
+  dir: string;
+  lastAccess: number;
+}
+const hlsSessions = new Map<string, HlsSession>();
+
+// Cleanup inactive HLS sessions every 30 seconds
+setInterval(() => {
+  const now = Date.now();
+  for (const [id, session] of hlsSessions.entries()) {
+    if (now - session.lastAccess > 40000) {
+      try {
+        session.process.kill('SIGKILL');
+      } catch (e) {}
+      try {
+        fs.rmSync(session.dir, { recursive: true, force: true });
+      } catch (e) {}
+      hlsSessions.delete(id);
+    }
+  }
+}, 20000);
+
+app.get('/api/live-hls/master.m3u8', async (req, res) => {
+  const streamUrl = req.query.url as string;
+  const forceTranscode = req.query.transcode === '1';
+
+  if (!streamUrl) {
+    return res.status(400).send('URL do stream é obrigatória.');
+  }
+
+  const hash = crypto.createHash('md5').update(streamUrl).digest('hex').slice(0, 12);
+  const sessionId = `${hash}_${forceTranscode ? 'tc' : 'rx'}`;
+  const sessionDir = path.join('/tmp', `hls_${sessionId}`);
+
+  let session = hlsSessions.get(sessionId);
+
+  if (!session || session.process.killed) {
+    // Create new session directory
+    try {
+      fs.rmSync(sessionDir, { recursive: true, force: true });
+    } catch (e) {}
+    fs.mkdirSync(sessionDir, { recursive: true });
+
+    const playlistPath = path.join(sessionDir, 'playlist.m3u8');
+    const segmentPattern = path.join(sessionDir, 'seg%d.ts');
+
+    const ffmpegArgs: string[] = [
+      '-hide_banner',
+      '-loglevel', 'error',
+      '-reconnect', '1',
+      '-reconnect_at_eof', '1',
+      '-reconnect_streamed', '1',
+      '-reconnect_delay_max', '5',
+      '-headers', 'User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36\r\nAccept: */*\r\n',
+      '-i', streamUrl,
+    ];
+
+    if (forceTranscode) {
+      ffmpegArgs.push(
+        '-c:v', 'libx264',
+        '-preset', 'ultrafast',
+        '-tune', 'zerolatency',
+        '-crf', '24',
+        '-pix_fmt', 'yuv420p',
+        '-c:a', 'aac',
+        '-b:a', '128k',
+        '-ac', '2',
+        '-ar', '48000'
+      );
+    } else {
+      // Smart remux: keep video, transcode audio to universal AAC
+      ffmpegArgs.push(
+        '-c:v', 'copy',
+        '-c:a', 'aac',
+        '-b:a', '128k',
+        '-ac', '2',
+        '-ar', '48000'
+      );
+    }
+
+    ffmpegArgs.push(
+      '-f', 'hls',
+      '-hls_time', '3',
+      '-hls_list_size', '15',
+      '-hls_flags', 'delete_segments+temp_file',
+      '-hls_segment_filename', segmentPattern,
+      playlistPath
+    );
+
+    const proc = spawn('ffmpeg', ffmpegArgs, {
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+
+    session = {
+      process: proc,
+      dir: sessionDir,
+      lastAccess: Date.now(),
+    };
+    hlsSessions.set(sessionId, session);
+
+    proc.on('error', (err) => {
+      console.error(`FFmpeg HLS error (${sessionId}):`, err.message);
+    });
+
+    proc.on('close', () => {
+      // FFmpeg finished or exited
+    });
+  } else {
+    session.lastAccess = Date.now();
+  }
+
+  // Wait for playlist to have at least 1 segment ready
+  const playlistPath = path.join(sessionDir, 'playlist.m3u8');
+  const startWait = Date.now();
+  while (Date.now() - startWait < 8000) {
+    if (fs.existsSync(playlistPath)) {
+      try {
+        const content = fs.readFileSync(playlistPath, 'utf-8');
+        if (content.includes('.ts')) {
+          res.setHeader('Content-Type', 'application/vnd.apple.mpegurl');
+          res.setHeader('Access-Control-Allow-Origin', '*');
+          res.setHeader('Cache-Control', 'no-cache, no-store');
+          // Rewrite segment names to point to our segment handler
+          const rewritten = content.replace(/(seg\d+\.ts)/g, `/api/live-hls/${sessionId}/$1`);
+          return res.send(rewritten);
+        }
+      } catch (e) {}
+    }
+    await new Promise((r) => setTimeout(r, 200));
+  }
+
+  return res.status(504).send('Tempo limite esgotado ao aguardar o fluxo de vídeo.');
+});
+
+// Serve HLS segments (.ts)
+app.get('/api/live-hls/:sessionId/:file', (req, res) => {
+  const { sessionId, file } = req.params;
+  const session = hlsSessions.get(sessionId);
+  if (session) {
+    session.lastAccess = Date.now();
+  }
+
+  // Sanitize file name
+  const safeFile = path.basename(file);
+  const filePath = path.join('/tmp', `hls_${sessionId}`, safeFile);
+
+  if (!fs.existsSync(filePath)) {
+    return res.status(404).send('Segmento não encontrado.');
+  }
+
+  res.setHeader('Content-Type', safeFile.endsWith('.m3u8') ? 'application/vnd.apple.mpegurl' : 'video/mp2t');
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Cache-Control', 'public, max-age=3600');
+  res.sendFile(filePath);
 });
 
 // Real-time on-the-fly video & audio remux/transcoding using native FFmpeg

@@ -1,4 +1,4 @@
-import React, { useState, useRef, useEffect } from 'react';
+import React, { useState, useRef, useEffect, useCallback } from 'react';
 import Hls from 'hls.js';
 import {
   ArrowLeft,
@@ -15,11 +15,14 @@ import {
   RefreshCw,
   Copy,
   Check,
-  ExternalLink,
   Tv,
+  Sparkles,
+  Sliders,
 } from 'lucide-react';
 import { M3UItem } from '../types/m3u';
 import { openInVlc } from '../utils/playerUtils';
+
+type PlaybackMode = 'web-remux' | 'web-full' | 'proxy' | 'direct';
 
 interface VideoPlayerProps {
   item: M3UItem;
@@ -32,6 +35,14 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({ item, onClose }) => {
   const progressBarRef = useRef<HTMLDivElement>(null);
   const hlsRef = useRef<Hls | null>(null);
 
+  // Determine smart initial mode:
+  // For VOD movies/series (which frequently use MKV / Dolby AC3), use server web-remux by default
+  const [playbackMode, setPlaybackMode] = useState<PlaybackMode>(() => {
+    const isHls = item.url.includes('.m3u8');
+    if (isHls) return 'proxy';
+    return 'web-remux';
+  });
+
   const [isPlaying, setIsPlaying] = useState(true);
   const [currentTime, setCurrentTime] = useState(0);
   const [duration, setDuration] = useState(0);
@@ -39,15 +50,10 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({ item, onClose }) => {
   const [isMuted, setIsMuted] = useState(false);
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [showControls, setShowControls] = useState(true);
+  const [showModeMenu, setShowModeMenu] = useState(false);
   const [isLoading, setIsLoading] = useState(true);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
-  const [useProxy, setUseProxy] = useState<boolean>(() => {
-    // If the app is on HTTPS and the video link is insecure HTTP, default to proxy
-    if (typeof window !== 'undefined' && window.location.protocol === 'https:' && item.url.startsWith('http://')) {
-      return true;
-    }
-    return false;
-  });
+  const [seekOffset, setSeekOffset] = useState<number>(0);
   const [copied, setCopied] = useState(false);
   const [hoverTime, setHoverTime] = useState<number | null>(null);
   const [hoverPosition, setHoverPosition] = useState<number>(0);
@@ -61,17 +67,31 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({ item, onClose }) => {
     idleTimerRef.current = setTimeout(() => {
       if (isPlaying) {
         setShowControls(false);
+        setShowModeMenu(false);
       }
     }, 3500);
   };
 
-  const getEffectiveUrl = (rawUrl: string, proxyEnabled: boolean) => {
+  const getTargetUrl = useCallback((mode: PlaybackMode, seekSeconds: number = 0) => {
+    const rawUrl = item.url;
     if (!rawUrl) return '';
-    if (proxyEnabled) {
+
+    if (mode === 'web-remux') {
+      const seekParam = seekSeconds > 0 ? `&seek=${Math.floor(seekSeconds)}` : '';
+      return `/api/transcode-stream?url=${encodeURIComponent(rawUrl)}&mode=remux${seekParam}`;
+    }
+
+    if (mode === 'web-full') {
+      const seekParam = seekSeconds > 0 ? `&seek=${Math.floor(seekSeconds)}` : '';
+      return `/api/transcode-stream?url=${encodeURIComponent(rawUrl)}&mode=full${seekParam}`;
+    }
+
+    if (mode === 'proxy') {
       return `/api/proxy-stream?url=${encodeURIComponent(rawUrl)}`;
     }
+
     return rawUrl;
-  };
+  }, [item.url]);
 
   // Video Stream Setup with HLS and Native support
   useEffect(() => {
@@ -81,8 +101,8 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({ item, onClose }) => {
     setErrorMessage(null);
     setIsLoading(true);
 
-    const targetUrl = getEffectiveUrl(item.url, useProxy);
-    const isHlsStream = item.url.includes('.m3u8') || item.url.includes('.ts');
+    const targetUrl = getTargetUrl(playbackMode, seekOffset);
+    const isHlsStream = item.url.includes('.m3u8') && playbackMode === 'proxy';
 
     // Clean up any previous Hls instance
     if (hlsRef.current) {
@@ -90,7 +110,7 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({ item, onClose }) => {
       hlsRef.current = null;
     }
 
-    if (Hls.isSupported() && isHlsStream && !useProxy) {
+    if (Hls.isSupported() && isHlsStream) {
       const hls = new Hls({
         enableWorker: true,
         lowLatencyMode: true,
@@ -109,39 +129,30 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({ item, onClose }) => {
         if (data.fatal) {
           switch (data.type) {
             case Hls.ErrorTypes.NETWORK_ERROR:
-              if (!useProxy && item.url.startsWith('http://')) {
-                setUseProxy(true);
-                return;
-              }
-              hls.startLoad();
+              // Fallback to web transcode
+              setPlaybackMode('web-remux');
               break;
             case Hls.ErrorTypes.MEDIA_ERROR:
               hls.recoverMediaError();
               break;
             default:
-              setErrorMessage('Falha ao reproduzir fluxo de transmissão (Erro de rede ou codec).');
-              setIsLoading(false);
+              setErrorMessage('Falha ao reproduzir fluxo HLS. Tentando modo de transcodificação...');
+              setPlaybackMode('web-remux');
               hls.destroy();
               break;
           }
         }
       });
-    } else if (video.canPlayType('application/vnd.apple.mpegurl') && isHlsStream && !useProxy) {
-      // Native Safari HLS
-      video.src = targetUrl;
-      video.load();
-      video.addEventListener('loadeddata', () => {
-        setIsLoading(false);
-        video.play().catch(() => setIsPlaying(false));
-      }, { once: true });
     } else {
-      // Direct MP4 / MKV or Proxied Stream
+      // Direct MP4 / Fragmented MP4 stream from FFmpeg
       video.src = targetUrl;
       video.load();
-      video.addEventListener('loadeddata', () => {
+      video.play().then(() => {
         setIsLoading(false);
-        video.play().catch(() => setIsPlaying(false));
-      }, { once: true });
+        setIsPlaying(true);
+      }).catch(() => {
+        // If autoplay prevented or loading takes a tick
+      });
     }
 
     return () => {
@@ -155,7 +166,7 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({ item, onClose }) => {
         video.load();
       }
     };
-  }, [item.url, useProxy]);
+  }, [item.url, playbackMode, seekOffset, getTargetUrl]);
 
   // Keyboard Shortcuts
   useEffect(() => {
@@ -196,13 +207,22 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({ item, onClose }) => {
   };
 
   const skipTime = (seconds: number) => {
-    if (!videoRef.current || isNaN(duration)) return;
-    videoRef.current.currentTime = Math.max(0, Math.min(videoRef.current.currentTime + seconds, duration || 0));
+    if (!videoRef.current) return;
+    if (duration > 0 && !isNaN(duration)) {
+      videoRef.current.currentTime = Math.max(0, Math.min(videoRef.current.currentTime + seconds, duration));
+    } else {
+      // Streamed without known total length: seek via backend offset
+      const newSeek = Math.max(0, currentTime + seekOffset + seconds);
+      setSeekOffset(newSeek);
+    }
   };
 
   const handleTimeUpdate = () => {
     if (videoRef.current) {
       setCurrentTime(videoRef.current.currentTime);
+      if (isLoading && videoRef.current.currentTime > 0) {
+        setIsLoading(false);
+      }
     }
   };
 
@@ -247,13 +267,19 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({ item, onClose }) => {
 
   const handleVideoError = () => {
     setIsLoading(false);
-    // If not tried proxy yet, try once
-    if (!useProxy && item.url.startsWith('http://')) {
-      setUseProxy(true);
+    // Auto-fallback chain:
+    // proxy -> web-remux (fast AAC audio) -> web-full (H.264 encode)
+    if (playbackMode === 'proxy' || playbackMode === 'direct') {
+      setPlaybackMode('web-remux');
       return;
     }
+    if (playbackMode === 'web-remux') {
+      setPlaybackMode('web-full');
+      return;
+    }
+
     setErrorMessage(
-      'Este filme ou série utiliza um formato ou codec (como MKV ou áudio Dolby AC3) que navegadores web não conseguem reproduzir nativamente.'
+      'Não foi possível iniciar este filme no navegador. O servidor de IPTV pode estar temporariamente offline ou com link expirado.'
     );
   };
 
@@ -268,11 +294,6 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({ item, onClose }) => {
 
   const handleOpenVlc = () => {
     openInVlc(item.url, item.title);
-  };
-
-  const handleOpenNewTab = () => {
-    const targetUrl = getEffectiveUrl(item.url, useProxy);
-    window.open(targetUrl, '_blank');
   };
 
   const formatTime = (timeInSeconds: number) => {
@@ -292,8 +313,14 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({ item, onClose }) => {
     const rect = progressBarRef.current.getBoundingClientRect();
     const clickX = e.clientX - rect.left;
     const newProgress = Math.max(0, Math.min(clickX / rect.width, 1));
-    videoRef.current.currentTime = newProgress * duration;
-    setCurrentTime(newProgress * duration);
+    const targetSeconds = newProgress * duration;
+
+    if (playbackMode === 'web-remux' || playbackMode === 'web-full') {
+      setSeekOffset(targetSeconds);
+    } else {
+      videoRef.current.currentTime = targetSeconds;
+    }
+    setCurrentTime(targetSeconds);
   };
 
   const handleProgressMouseMove = (e: React.MouseEvent<HTMLDivElement>) => {
@@ -309,7 +336,8 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({ item, onClose }) => {
     setHoverTime(null);
   };
 
-  const progressPercent = duration > 0 ? (currentTime / duration) * 100 : 0;
+  const effectiveCurrentTime = currentTime + seekOffset;
+  const progressPercent = duration > 0 ? (effectiveCurrentTime / duration) * 100 : 0;
 
   return (
     <div
@@ -320,14 +348,14 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({ item, onClose }) => {
     >
       {/* Top Bar */}
       <div
-        className={`absolute top-0 left-0 right-0 z-30 flex items-center justify-between p-4 sm:p-6 bg-gradient-to-b from-black/90 via-black/40 to-transparent transition-opacity duration-300 ${
+        className={`absolute top-0 left-0 right-0 z-30 flex items-center justify-between p-4 sm:p-6 bg-gradient-to-b from-black/95 via-black/50 to-transparent transition-opacity duration-300 ${
           showControls ? 'opacity-100' : 'opacity-0 pointer-events-none'
         }`}
       >
         <div className="flex items-center gap-4">
           <button
             onClick={onClose}
-            className="w-10 h-10 rounded-full bg-black/50 hover:bg-black/80 text-white flex items-center justify-center transition-all cursor-pointer border border-white/10"
+            className="w-10 h-10 rounded-full bg-black/60 hover:bg-black/90 text-white flex items-center justify-center transition-all cursor-pointer border border-white/10"
             title="Voltar ao catálogo"
           >
             <ArrowLeft className="w-6 h-6" />
@@ -336,7 +364,7 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({ item, onClose }) => {
             <h2 className="text-white font-bold text-base sm:text-xl drop-shadow line-clamp-1">
               {item.rawTitle || item.title}
             </h2>
-            <div className="flex items-center gap-2 text-xs text-zinc-400">
+            <div className="flex items-center gap-2 text-xs text-zinc-400 flex-wrap">
               <span>{item.group}</span>
               {item.year && (
                 <>
@@ -346,17 +374,84 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({ item, onClose }) => {
               )}
               <span aria-hidden="true">·</span>
               <span className="text-[#46d369] font-medium">{item.isSeries ? 'Série' : 'Filme'}</span>
-              {useProxy && (
-                <>
-                  <span aria-hidden="true">·</span>
-                  <span className="text-amber-400 text-[10px] uppercase font-mono">Proxy Ativo</span>
-                </>
-              )}
+
+              {/* Mode indicator badge */}
+              <span aria-hidden="true">·</span>
+              <div className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-zinc-800/90 text-[11px] font-medium border border-zinc-700">
+                <Sparkles className="w-3 h-3 text-[#e50914]" />
+                <span className="text-zinc-200">
+                  {playbackMode === 'web-remux' && 'Web Player (Remux + Áudio AAC)'}
+                  {playbackMode === 'web-full' && 'Web Player (H.264 Total)'}
+                  {playbackMode === 'proxy' && 'Proxy Direto'}
+                  {playbackMode === 'direct' && 'Conexão Direta'}
+                </span>
+              </div>
             </div>
           </div>
         </div>
 
-        <div className="flex items-center gap-3">
+        <div className="flex items-center gap-2 sm:gap-3">
+          {/* Mode Switcher Button */}
+          <div className="relative">
+            <button
+              onClick={() => setShowModeMenu(!showModeMenu)}
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded bg-zinc-800/90 hover:bg-zinc-700 text-xs font-semibold text-zinc-200 border border-zinc-700 cursor-pointer transition-colors shadow"
+              title="Trocar modo de compatibilidade de vídeo"
+            >
+              <Sliders className="w-3.5 h-3.5 text-zinc-400" />
+              <span className="hidden sm:inline">Modo Navegador</span>
+            </button>
+
+            {showModeMenu && (
+              <div
+                className="absolute right-0 top-10 w-64 bg-zinc-900 border border-zinc-700 rounded-lg p-2 shadow-2xl z-40 text-xs flex flex-col gap-1 text-white"
+                onClick={(e) => e.stopPropagation()}
+              >
+                <div className="px-2 py-1 font-bold text-zinc-400 border-b border-zinc-800 text-[10px] uppercase">
+                  Modo de Reprodução Web
+                </div>
+                <button
+                  onClick={() => {
+                    setPlaybackMode('web-remux');
+                    setShowModeMenu(false);
+                  }}
+                  className={`text-left px-2.5 py-2 rounded flex flex-col transition-colors cursor-pointer ${
+                    playbackMode === 'web-remux' ? 'bg-[#e50914] text-white font-bold' : 'hover:bg-zinc-800 text-zinc-200'
+                  }`}
+                >
+                  <span>⚡ Web Player Remux (Recomendado)</span>
+                  <span className="text-[10px] opacity-75 font-normal">Converte áudio Dolby para AAC. Início imediato.</span>
+                </button>
+
+                <button
+                  onClick={() => {
+                    setPlaybackMode('web-full');
+                    setShowModeMenu(false);
+                  }}
+                  className={`text-left px-2.5 py-2 rounded flex flex-col transition-colors cursor-pointer ${
+                    playbackMode === 'web-full' ? 'bg-[#e50914] text-white font-bold' : 'hover:bg-zinc-800 text-zinc-200'
+                  }`}
+                >
+                  <span>🖥️ Web Player H.264 Total</span>
+                  <span className="text-[10px] opacity-75 font-normal">Re-codifica vídeo e áudio para compatibilidade máxima.</span>
+                </button>
+
+                <button
+                  onClick={() => {
+                    setPlaybackMode('proxy');
+                    setShowModeMenu(false);
+                  }}
+                  className={`text-left px-2.5 py-2 rounded flex flex-col transition-colors cursor-pointer ${
+                    playbackMode === 'proxy' ? 'bg-[#e50914] text-white font-bold' : 'hover:bg-zinc-800 text-zinc-200'
+                  }`}
+                >
+                  <span>🌐 Fluxo Original (Proxy)</span>
+                  <span className="text-[10px] opacity-75 font-normal">Sem conversão (indicado para canais HLS).</span>
+                </button>
+              </div>
+            )}
+          </div>
+
           <button
             onClick={handleOpenVlc}
             className="hidden sm:flex items-center gap-1.5 px-3 py-1.5 rounded bg-zinc-800/80 hover:bg-zinc-700 text-xs font-semibold text-zinc-200 border border-zinc-700 cursor-pointer transition-colors"
@@ -365,10 +460,6 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({ item, onClose }) => {
             <Tv className="w-3.5 h-3.5 text-amber-400" />
             <span>Abrir no VLC</span>
           </button>
-
-          <div className="text-xs font-bold text-[#e50914] tracking-widest uppercase hidden md:block">
-            OtimFlix Player
-          </div>
         </div>
       </div>
 
@@ -395,58 +486,50 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({ item, onClose }) => {
 
         {/* Loading Spinner */}
         {isLoading && !errorMessage && (
-          <div className="absolute inset-0 flex flex-col items-center justify-center bg-black/50 backdrop-blur-xs z-10 pointer-events-none">
+          <div className="absolute inset-0 flex flex-col items-center justify-center bg-black/60 backdrop-blur-xs z-10 pointer-events-none">
             <div className="w-14 h-14 border-4 border-zinc-700 border-t-[#e50914] rounded-full animate-spin mb-4" />
-            <span className="text-zinc-300 text-sm font-medium">Carregando transmissão...</span>
+            <span className="text-zinc-200 text-sm font-semibold">
+              {playbackMode === 'web-remux' && 'Convertendo áudio para o navegador...'}
+              {playbackMode === 'web-full' && 'Ajustando codecs para o navegador...'}
+              {playbackMode === 'proxy' && 'Carregando transmissão...'}
+              {playbackMode === 'direct' && 'Conectando ao provedor...'}
+            </span>
+            <span className="text-zinc-400 text-xs mt-1">Reproduzindo diretamente na janela</span>
           </div>
         )}
 
         {/* Error message / Fallback options */}
         {errorMessage && (
-          <div className="absolute inset-0 flex flex-col items-center justify-center bg-black/92 z-20 p-4 sm:p-6 text-center animate-in fade-in">
+          <div className="absolute inset-0 flex flex-col items-center justify-center bg-black/95 z-20 p-4 sm:p-6 text-center animate-in fade-in">
             <AlertTriangle className="w-12 h-12 text-[#e50914] mb-3" />
             <h3 className="text-lg sm:text-xl font-bold text-white mb-2">
-              Formato de vídeo não suportado pelo navegador
+              Erro ao conectar ao fluxo deste filme
             </h3>
             <p className="text-xs sm:text-sm text-zinc-400 max-w-lg mb-6 leading-relaxed">
-              Muitos filmes sob demanda (VOD) utilizam áudio <strong>Dolby Digital (AC3/EAC3)</strong> ou container <strong>MKV</strong>, que não possuem suporte nativo nos navegadores web modernos (Chrome/Firefox).
-              <br />
-              <span className="text-zinc-200 font-medium">Você pode assistir perfeitamente usando as opções abaixo:</span>
+              {errorMessage}
             </p>
 
             <div className="flex flex-col sm:flex-row items-center gap-3 flex-wrap justify-center mb-6 max-w-xl">
-              {/* Recommended: VLC / System Player */}
+              <button
+                onClick={(e) => {
+                  e.stopPropagation();
+                  setPlaybackMode(playbackMode === 'web-remux' ? 'web-full' : 'web-remux');
+                }}
+                className="w-full sm:w-auto inline-flex items-center justify-center gap-2 px-5 py-3 bg-[#e50914] hover:bg-[#b20710] text-white font-bold text-xs uppercase tracking-wider rounded-lg shadow-xl cursor-pointer transition-all active:scale-95"
+              >
+                <RefreshCw className="w-3.5 h-3.5" />
+                <span>Tentar Modo H.264 Total</span>
+              </button>
+
               <button
                 onClick={(e) => {
                   e.stopPropagation();
                   handleOpenVlc();
                 }}
-                className="w-full sm:w-auto inline-flex items-center justify-center gap-2 px-5 py-3 bg-[#e50914] hover:bg-[#b20710] text-white font-bold text-xs sm:text-sm uppercase tracking-wider rounded-lg shadow-xl cursor-pointer transition-all active:scale-95"
-              >
-                <Tv className="w-4 h-4" />
-                <span>Abrir no VLC / Player do Dispositivo</span>
-              </button>
-
-              <button
-                onClick={(e) => {
-                  e.stopPropagation();
-                  handleOpenNewTab();
-                }}
                 className="w-full sm:w-auto inline-flex items-center justify-center gap-2 px-4 py-3 bg-zinc-800 hover:bg-zinc-700 text-zinc-200 hover:text-white font-bold text-xs uppercase tracking-wider rounded-lg cursor-pointer transition-all border border-zinc-700"
               >
-                <ExternalLink className="w-3.5 h-3.5" />
-                <span>Abrir em Nova Aba</span>
-              </button>
-
-              <button
-                onClick={(e) => {
-                  e.stopPropagation();
-                  setUseProxy(!useProxy);
-                }}
-                className="w-full sm:w-auto inline-flex items-center justify-center gap-2 px-4 py-3 bg-zinc-800 hover:bg-zinc-700 text-zinc-200 hover:text-white font-bold text-xs uppercase tracking-wider rounded-lg cursor-pointer transition-all border border-zinc-700"
-              >
-                <RefreshCw className="w-3.5 h-3.5" />
-                <span>{useProxy ? 'Conexão Direta' : 'Modo Proxy'}</span>
+                <Tv className="w-3.5 h-3.5 text-amber-400" />
+                <span>Abrir no VLC</span>
               </button>
 
               <button
@@ -485,7 +568,7 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({ item, onClose }) => {
         }`}
         onClick={(e) => e.stopPropagation()}
       >
-        {/* Progress Bar (if duration known) */}
+        {/* Progress Bar */}
         {duration > 0 && (
           <div
             ref={progressBarRef}
@@ -526,27 +609,23 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({ item, onClose }) => {
               {isPlaying ? <Pause className="w-6 h-6 fill-current" /> : <Play className="w-6 h-6 fill-current" />}
             </button>
 
-            {duration > 0 && (
-              <>
-                <button
-                  onClick={() => skipTime(-10)}
-                  className="hover:text-zinc-300 transition-colors p-1 flex items-center justify-center relative group cursor-pointer"
-                  title="Voltar 10s"
-                >
-                  <RotateCcw className="w-5 h-5" />
-                  <span className="text-[9px] font-bold absolute top-1.5">10</span>
-                </button>
+            <button
+              onClick={() => skipTime(-10)}
+              className="hover:text-zinc-300 transition-colors p-1 flex items-center justify-center relative group cursor-pointer"
+              title="Voltar 10s"
+            >
+              <RotateCcw className="w-5 h-5" />
+              <span className="text-[9px] font-bold absolute top-1.5">10</span>
+            </button>
 
-                <button
-                  onClick={() => skipTime(10)}
-                  className="hover:text-zinc-300 transition-colors p-1 flex items-center justify-center relative group cursor-pointer"
-                  title="Avançar 10s"
-                >
-                  <RotateCw className="w-5 h-5" />
-                  <span className="text-[9px] font-bold absolute top-1.5">10</span>
-                </button>
-              </>
-            )}
+            <button
+              onClick={() => skipTime(10)}
+              className="hover:text-zinc-300 transition-colors p-1 flex items-center justify-center relative group cursor-pointer"
+              title="Avançar 10s"
+            >
+              <RotateCw className="w-5 h-5" />
+              <span className="text-[9px] font-bold absolute top-1.5">10</span>
+            </button>
 
             <div className="flex items-center gap-2">
               <button
@@ -573,13 +652,15 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({ item, onClose }) => {
               />
             </div>
 
-            {duration > 0 && (
-              <div className="text-xs sm:text-sm font-mono text-zinc-300 tabular-nums">
-                <span>{formatTime(currentTime)}</span>
-                <span className="text-zinc-600 mx-1">/</span>
-                <span>{formatTime(duration)}</span>
-              </div>
-            )}
+            <div className="text-xs sm:text-sm font-mono text-zinc-300 tabular-nums">
+              <span>{formatTime(effectiveCurrentTime)}</span>
+              {duration > 0 && (
+                <>
+                  <span className="text-zinc-600 mx-1">/</span>
+                  <span>{formatTime(duration)}</span>
+                </>
+              )}
+            </div>
           </div>
 
           <div className="flex items-center gap-4">

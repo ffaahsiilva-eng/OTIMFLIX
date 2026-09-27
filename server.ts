@@ -2,6 +2,7 @@ import express from 'express';
 import { createServer as createViteServer } from 'vite';
 import path from 'path';
 import zlib from 'zlib';
+import { spawn } from 'child_process';
 
 // Allow self-signed or private certificates commonly used by IPTV servers
 process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
@@ -208,6 +209,99 @@ app.get('/api/proxy-stream', async (req, res) => {
       res.end();
     }
   }
+});
+
+// Real-time on-the-fly video & audio remux/transcoding using native FFmpeg
+// Converts MKV, TS, AC3/Dolby and HEVC to browser-compatible fragmented MP4 + AAC audio
+app.get('/api/transcode-stream', (req, res) => {
+  const streamUrl = req.query.url as string;
+  if (!streamUrl) {
+    return res.status(400).send('URL do stream é obrigatória.');
+  }
+
+  const seek = req.query.seek ? parseFloat(req.query.seek as string) : 0;
+  const mode = (req.query.mode as string) || 'remux'; // 'remux' (fast, AAC audio conversion) or 'full' (h264 encode)
+
+  const ffmpegArgs: string[] = [
+    '-hide_banner',
+    '-loglevel', 'error',
+    '-reconnect', '1',
+    '-reconnect_at_eof', '1',
+    '-reconnect_streamed', '1',
+    '-reconnect_delay_max', '5',
+    '-user_agent', 'IPTVSmarters/1.0.0 (Linux; Android 10) VLC/3.0.18',
+  ];
+
+  if (seek > 0) {
+    ffmpegArgs.push('-ss', seek.toString());
+  }
+
+  ffmpegArgs.push('-i', streamUrl);
+
+  if (mode === 'full') {
+    // Re-encode video to ultra-compatible H.264 + AAC audio
+    ffmpegArgs.push(
+      '-c:v', 'libx264',
+      '-preset', 'ultrafast',
+      '-tune', 'zerolatency',
+      '-crf', '24',
+      '-pix_fmt', 'yuv420p',
+      '-c:a', 'aac',
+      '-b:a', '192k',
+      '-ac', '2',
+      '-ar', '48000'
+    );
+  } else {
+    // Smart Remux mode: Copy video stream directly without CPU overhead,
+    // convert Dolby AC3 / DTS / EAC-3 audio to browser-supported AAC stereo
+    ffmpegArgs.push(
+      '-c:v', 'copy',
+      '-c:a', 'aac',
+      '-b:a', '192k',
+      '-ac', '2',
+      '-ar', '48000'
+    );
+  }
+
+  // Output container: Fragmented MP4 stream for immediate web playback
+  ffmpegArgs.push(
+    '-f', 'mp4',
+    '-movflags', 'frag_keyframe+empty_moov+default_base_moof',
+    'pipe:1'
+  );
+
+  res.writeHead(200, {
+    'Content-Type': 'video/mp4',
+    'Access-Control-Allow-Origin': '*',
+    'Access-Control-Allow-Headers': 'Range, Content-Type, Accept',
+    'Connection': 'keep-alive',
+    'Cache-Control': 'no-cache, no-store',
+  });
+
+  const ffmpegProcess = spawn('ffmpeg', ffmpegArgs, {
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+
+  ffmpegProcess.stdout.pipe(res);
+
+  ffmpegProcess.stderr.on('data', (data) => {
+    // Log fatal transcoding errors
+    console.error('FFmpeg stderr:', data.toString());
+  });
+
+  ffmpegProcess.on('error', (err) => {
+    console.error('Failed to spawn ffmpeg:', err.message);
+    if (!res.headersSent) {
+      res.status(500).send('Falha ao iniciar transcodificador.');
+    }
+  });
+
+  // Terminate ffmpeg immediately if client closes connection, pauses or changes movie
+  req.on('close', () => {
+    try {
+      ffmpegProcess.kill('SIGKILL');
+    } catch (e) {}
+  });
 });
 
 async function startServer() {

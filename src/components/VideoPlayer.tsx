@@ -203,6 +203,10 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({ item, onClose }) => {
         video.removeAttribute('src');
         video.load();
       }
+      // Notify backend to clean up transcode session
+      if (item.url) {
+        fetch(`/api/live-hls/stop?url=${encodeURIComponent(item.url)}`, { keepalive: true }).catch(() => {});
+      }
     };
   }, [item.url, playbackMode, getTargetUrl]);
 

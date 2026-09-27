@@ -297,9 +297,9 @@ app.get('/api/live-hls/master.m3u8', async (req, res) => {
 
     ffmpegArgs.push(
       '-f', 'hls',
-      '-hls_time', '2',
-      '-hls_list_size', '15',
-      '-hls_flags', 'delete_segments+temp_file',
+      '-hls_time', '4',
+      '-hls_list_size', '0',
+      '-hls_playlist_type', 'event',
       '-hls_segment_filename', segmentPattern,
       playlistPath
     );
@@ -385,6 +385,28 @@ app.get('/api/live-hls/:sessionId/:file', (req, res) => {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Cache-Control', 'public, max-age=3600');
   res.sendFile(filePath);
+});
+
+// Explicit session stop endpoint
+app.all('/api/live-hls/stop', (req, res) => {
+  const streamUrl = (req.query.url || req.body?.url) as string;
+  if (streamUrl) {
+    const hash = crypto.createHash('md5').update(streamUrl).digest('hex').slice(0, 12);
+    for (const suffix of ['rx', 'tc']) {
+      const sessionId = `${hash}_${suffix}`;
+      const session = hlsSessions.get(sessionId);
+      if (session) {
+        try {
+          session.process.kill('SIGKILL');
+        } catch (e) {}
+        try {
+          fs.rmSync(session.dir, { recursive: true, force: true });
+        } catch (e) {}
+        hlsSessions.delete(sessionId);
+      }
+    }
+  }
+  res.sendStatus(200);
 });
 
 // Real-time on-the-fly video & audio remux/transcoding using native FFmpeg

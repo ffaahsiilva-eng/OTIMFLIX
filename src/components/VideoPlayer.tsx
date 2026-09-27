@@ -40,7 +40,9 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({ item, onClose }) => {
 
   const [isPlaying, setIsPlaying] = useState(true);
   const [currentTime, setCurrentTime] = useState(0);
+  const [bufferedTime, setBufferedTime] = useState(0);
   const [duration, setDuration] = useState(0);
+  const [mediaDuration, setMediaDuration] = useState(0);
   const [volume, setVolume] = useState(0.9);
   const [isMuted, setIsMuted] = useState(false);
   const [isFullscreen, setIsFullscreen] = useState(false);
@@ -70,6 +72,26 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({ item, onClose }) => {
       if (interval) clearInterval(interval);
     };
   }, [isLoading, errorMessage]);
+
+  // Probe real total duration of the movie from backend
+  useEffect(() => {
+    if (!item.url) return;
+    setMediaDuration(0);
+    let isMounted = true;
+
+    fetch(`/api/media-duration?url=${encodeURIComponent(item.url)}`)
+      .then((res) => res.json())
+      .then((data) => {
+        if (isMounted && data?.duration && data.duration > 0) {
+          setMediaDuration(data.duration);
+        }
+      })
+      .catch(() => {});
+
+    return () => {
+      isMounted = false;
+    };
+  }, [item.url]);
 
   // Auto-hide controls
   const handleMouseMove = () => {
@@ -122,8 +144,13 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({ item, onClose }) => {
     if (Hls.isSupported() && usesHlsJs) {
       const hls = new Hls({
         enableWorker: true,
-        lowLatencyMode: true,
-        backBufferLength: 90,
+        lowLatencyMode: false, // Desliga modo live para permitir buffer profundo de filmes
+        maxBufferLength: 180, // Mantém até 3 minutos adiantados constantemente
+        maxMaxBufferLength: 3600, // Permite carregar até 1 hora de filme na memória
+        maxBufferSize: 512 * 1024 * 1024, // 512 MB de cache de vídeo
+        backBufferLength: 120, // 2 minutos para voltar instantaneamente
+        highBufferWatchdogPeriod: 2,
+        progressive: true,
       });
       hlsRef.current = hls;
 
@@ -133,6 +160,13 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({ item, onClose }) => {
       hls.on(Hls.Events.MANIFEST_PARSED, () => {
         setIsLoading(false);
         video.play().catch(() => setIsPlaying(false));
+      });
+
+      // Update stream duration as segments load
+      hls.on(Hls.Events.LEVEL_UPDATED, (_, data) => {
+        if (data?.details?.totalduration && isFinite(data.details.totalduration)) {
+          setDuration((prev) => Math.max(prev, data.details.totalduration));
+        }
       });
 
       hls.on(Hls.Events.ERROR, (_, data) => {
@@ -235,7 +269,14 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({ item, onClose }) => {
 
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [isPlaying, isMuted, isFullscreen, duration]);
+  }, [isPlaying, isMuted, isFullscreen, duration, mediaDuration]);
+
+  // Effective duration calculation: prioritize real movie duration
+  const effectiveDuration = mediaDuration > 0
+    ? mediaDuration
+    : duration > 0
+    ? Math.max(duration, currentTime)
+    : Math.max(currentTime, 1);
 
   const togglePlay = () => {
     if (!videoRef.current) return;
@@ -249,23 +290,42 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({ item, onClose }) => {
   };
 
   const skipTime = (seconds: number) => {
-    if (!videoRef.current || isNaN(duration)) return;
-    videoRef.current.currentTime = Math.max(0, Math.min(videoRef.current.currentTime + seconds, duration || 0));
+    if (!videoRef.current) return;
+    const target = Math.max(0, Math.min(currentTime + seconds, effectiveDuration));
+    videoRef.current.currentTime = target;
+    setCurrentTime(target);
   };
 
   const handleTimeUpdate = () => {
     if (videoRef.current) {
-      setCurrentTime(videoRef.current.currentTime);
-      if (isLoading && videoRef.current.currentTime > 0) {
+      const cur = videoRef.current.currentTime;
+      setCurrentTime(cur);
+      if (isLoading && cur > 0) {
         setIsLoading(false);
+      }
+      // Read actual downloaded buffer from video element
+      const buf = videoRef.current.buffered;
+      if (buf && buf.length > 0) {
+        for (let i = 0; i < buf.length; i++) {
+          if (buf.start(i) <= cur && cur <= buf.end(i)) {
+            setBufferedTime(buf.end(i));
+            break;
+          }
+        }
       }
     }
   };
 
   const handleLoadedMetadata = () => {
-    if (videoRef.current) {
-      setDuration(videoRef.current.duration || 0);
+    if (videoRef.current && isFinite(videoRef.current.duration)) {
+      setDuration(videoRef.current.duration);
       setIsLoading(false);
+    }
+  };
+
+  const handleDurationChange = () => {
+    if (videoRef.current && isFinite(videoRef.current.duration)) {
+      setDuration(videoRef.current.duration);
     }
   };
 
@@ -327,28 +387,38 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({ item, onClose }) => {
   };
 
   const handleProgressClick = (e: React.MouseEvent<HTMLDivElement>) => {
-    if (!progressBarRef.current || !videoRef.current || !duration) return;
+    if (!progressBarRef.current || !videoRef.current || !effectiveDuration) return;
     const rect = progressBarRef.current.getBoundingClientRect();
     const clickX = e.clientX - rect.left;
     const newProgress = Math.max(0, Math.min(clickX / rect.width, 1));
-    videoRef.current.currentTime = newProgress * duration;
-    setCurrentTime(newProgress * duration);
+    const targetTime = newProgress * effectiveDuration;
+
+    videoRef.current.currentTime = targetTime;
+    setCurrentTime(targetTime);
   };
 
   const handleProgressMouseMove = (e: React.MouseEvent<HTMLDivElement>) => {
-    if (!progressBarRef.current || !duration) return;
+    if (!progressBarRef.current || !effectiveDuration) return;
     const rect = progressBarRef.current.getBoundingClientRect();
     const clickX = e.clientX - rect.left;
     const percentage = Math.max(0, Math.min(clickX / rect.width, 1));
     setHoverPosition(clickX);
-    setHoverTime(percentage * duration);
+    setHoverTime(percentage * effectiveDuration);
   };
 
   const handleProgressMouseLeave = () => {
     setHoverTime(null);
   };
 
-  const progressPercent = duration > 0 ? (currentTime / duration) * 100 : 0;
+  // Accurate progress percentage matching the real movie duration
+  const progressPercent = effectiveDuration > 0
+    ? Math.min(100, Math.max(0, (currentTime / effectiveDuration) * 100))
+    : 0;
+
+  // Percentage of movie downloaded and stored in buffer
+  const bufferedPercent = effectiveDuration > 0
+    ? Math.min(100, Math.max(0, (bufferedTime / effectiveDuration) * 100))
+    : 0;
 
   return (
     <div
@@ -485,6 +555,7 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({ item, onClose }) => {
           autoPlay
           onTimeUpdate={handleTimeUpdate}
           onLoadedMetadata={handleLoadedMetadata}
+          onDurationChange={handleDurationChange}
           onWaiting={() => setIsLoading(true)}
           onPlaying={() => {
             setIsLoading(false);
@@ -618,35 +689,40 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({ item, onClose }) => {
         }`}
         onClick={(e) => e.stopPropagation()}
       >
-        {/* Progress Bar */}
-        {duration > 0 && (
-          <div
-            ref={progressBarRef}
-            onClick={handleProgressClick}
-            onMouseMove={handleProgressMouseMove}
-            onMouseLeave={handleProgressMouseLeave}
-            className="relative w-full h-2 group/progress cursor-pointer mb-4 flex items-center"
-          >
-            <div className="w-full h-1.5 bg-zinc-700/60 rounded-full overflow-hidden group-hover/progress:h-2.5 transition-all">
-              <div
-                className="h-full bg-[#e50914] transition-all relative"
-                style={{ width: `${progressPercent}%` }}
-              />
-            </div>
+        {/* Progress Bar with Accurate Movie Time */}
+        <div
+          ref={progressBarRef}
+          onClick={handleProgressClick}
+          onMouseMove={handleProgressMouseMove}
+          onMouseLeave={handleProgressMouseLeave}
+          className="relative w-full h-3 group/progress cursor-pointer mb-3 flex items-center"
+        >
+          <div className="w-full h-1.5 bg-zinc-700/60 rounded-full overflow-hidden group-hover/progress:h-2.5 transition-all relative">
+            {/* Gray Buffered Bar (downloading movie ahead at full speed) */}
             <div
-              className="absolute w-3.5 h-3.5 bg-[#e50914] rounded-full shadow -ml-1.5 opacity-0 group-hover/progress:opacity-100 transition-opacity"
-              style={{ left: `${progressPercent}%` }}
+              className="h-full bg-white/30 rounded-full absolute top-0 left-0 transition-all duration-300 pointer-events-none"
+              style={{ width: `${bufferedPercent}%` }}
+              title={`Carregado na memória: ${formatTime(bufferedTime)}`}
             />
-            {hoverTime !== null && (
-              <div
-                className="absolute -top-8 px-2 py-0.5 bg-black/90 border border-zinc-700 text-white text-[11px] font-mono rounded -translate-x-1/2 pointer-events-none"
-                style={{ left: `${hoverPosition}px` }}
-              >
-                {formatTime(hoverTime)}
-              </div>
-            )}
+            {/* Red Current Playback Bar */}
+            <div
+              className="h-full bg-[#e50914] transition-all relative"
+              style={{ width: `${progressPercent}%` }}
+            />
           </div>
-        )}
+          <div
+            className="absolute w-3.5 h-3.5 bg-[#e50914] rounded-full shadow -ml-1.5 opacity-0 group-hover/progress:opacity-100 transition-opacity"
+            style={{ left: `${progressPercent}%` }}
+          />
+          {hoverTime !== null && (
+            <div
+              className="absolute -top-8 px-2 py-0.5 bg-black/90 border border-zinc-700 text-white text-[11px] font-mono rounded -translate-x-1/2 pointer-events-none"
+              style={{ left: `${hoverPosition}px` }}
+            >
+              {formatTime(hoverTime)}
+            </div>
+          )}
+        </div>
 
         {/* Controls Row */}
         <div className="flex items-center justify-between text-white">
@@ -702,14 +778,11 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({ item, onClose }) => {
               />
             </div>
 
+            {/* Time display: shows exact current position and full movie duration */}
             <div className="text-xs sm:text-sm font-mono text-zinc-300 tabular-nums">
               <span>{formatTime(currentTime)}</span>
-              {duration > 0 && (
-                <>
-                  <span className="text-zinc-600 mx-1">/</span>
-                  <span>{formatTime(duration)}</span>
-                </>
-              )}
+              <span className="text-zinc-600 mx-1">/</span>
+              <span>{formatTime(effectiveDuration)}</span>
             </div>
           </div>
 

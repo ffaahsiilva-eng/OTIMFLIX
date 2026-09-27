@@ -13,6 +13,7 @@ import { SearchResults } from './components/SearchResults';
 import { WelcomeScreen } from './components/WelcomeScreen';
 import { LoadingScreen } from './components/LoadingScreen';
 import { Toast } from './components/Toast';
+import { CategoryBar } from './components/CategoryBar';
 import { parseM3UAsync } from './utils/m3uParser';
 import { batchEnrichItems, CURATED_DEMO_M3U } from './utils/tmdbService';
 import { fetchRemoteM3U } from './utils/fetchPlaylist';
@@ -233,9 +234,18 @@ export default function App() {
     return map;
   }, [allItems]);
 
-  const categoryNames = useMemo(() => {
-    return Object.keys(categoriesMap);
+  // Sorted categories by item count to display most rich categories first
+  const categoriesWithCounts = useMemo(() => {
+    return Object.entries(categoriesMap)
+      .map(([name, items]) => ({ name, count: items.length }))
+      .sort((a, b) => b.count - a.count);
   }, [categoriesMap]);
+
+  const sortedCategoryNames = useMemo(() => {
+    return categoriesWithCounts.map((c) => c.name);
+  }, [categoriesWithCounts]);
+
+  const [visibleRowsCount, setVisibleRowsCount] = useState<number>(6);
 
   // Featured Hero Item (pick one with high resolution image or backdrop)
   const heroItem = useMemo(() => {
@@ -336,7 +346,7 @@ export default function App() {
       {viewState === 'app' && (
         <>
           <Navbar
-            categories={categoryNames}
+            categories={sortedCategoryNames}
             activeCategory={activeCategory}
             onSelectCategory={(cat) => {
               setActiveCategory(cat);
@@ -349,6 +359,20 @@ export default function App() {
             totalMoviesCount={moviesCount}
             totalSeriesCount={seriesCount}
           />
+
+          <div className="pt-16 sm:pt-20">
+            <CategoryBar
+              categories={categoriesWithCounts}
+              activeCategory={activeCategory}
+              onSelectCategory={(cat) => {
+                setActiveCategory(cat);
+                window.scrollTo({ top: 0, behavior: 'smooth' });
+              }}
+              moviesCount={moviesCount}
+              seriesCount={seriesCount}
+              favoritesCount={favorites.length}
+            />
+          </div>
 
           <main className="flex-1 pb-16">
             {isSearchOrCategoryActive ? (
@@ -406,8 +430,8 @@ export default function App() {
                     />
                   )}
 
-                  {/* Dynamic Category Rows */}
-                  {categoryNames.map((catName) => {
+                  {/* High performance dynamic category rows (first batch) */}
+                  {sortedCategoryNames.slice(0, visibleRowsCount).map((catName) => {
                     const catItems = categoriesMap[catName];
                     if (!catItems || catItems.length === 0) return null;
                     return (
@@ -421,9 +445,51 @@ export default function App() {
                         onToggleFavorite={handleToggleFavorite}
                         likes={likes}
                         onToggleLike={handleToggleLike}
+                        onSelectCategory={(cat) => {
+                          setActiveCategory(cat);
+                          window.scrollTo({ top: 0, behavior: 'smooth' });
+                        }}
                       />
                     );
                   })}
+
+                  {/* Progressive loading button & quick categories panel to prevent DOM lag */}
+                  {sortedCategoryNames.length > visibleRowsCount && (
+                    <div className="py-8 px-4 sm:px-12 text-center flex flex-col items-center">
+                      <div className="mb-6 max-w-4xl w-full p-6 rounded-2xl bg-zinc-900/60 border border-zinc-800 backdrop-blur-sm">
+                        <h3 className="text-sm font-bold uppercase tracking-wider text-zinc-400 mb-3">
+                          Mais Categorias Disponíveis ({sortedCategoryNames.length - visibleRowsCount})
+                        </h3>
+                        <p className="text-xs text-zinc-500 mb-4">
+                          Clique em qualquer categoria para abrir instantaneamente sem travar a navegação.
+                        </p>
+                        <div className="flex flex-wrap items-center justify-center gap-2">
+                          {sortedCategoryNames.slice(visibleRowsCount, visibleRowsCount + 16).map((name) => (
+                            <button
+                              key={name}
+                              onClick={() => {
+                                setActiveCategory(name);
+                                window.scrollTo({ top: 0, behavior: 'smooth' });
+                              }}
+                              className="px-3 py-1.5 rounded-full text-xs font-medium bg-zinc-800/80 hover:bg-[#e50914] text-zinc-300 hover:text-white border border-zinc-700/60 transition-all cursor-pointer"
+                            >
+                              <span>{name}</span>
+                              <span className="text-[10px] ml-1.5 text-zinc-400 font-mono">
+                                ({categoriesMap[name]?.length || 0})
+                              </span>
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+
+                      <button
+                        onClick={() => setVisibleRowsCount((prev) => prev + 6)}
+                        className="inline-flex items-center gap-2 px-6 py-3 rounded-full bg-zinc-800 hover:bg-zinc-700 text-white font-bold text-xs uppercase tracking-wider border border-zinc-700 transition-all cursor-pointer shadow-lg hover:border-zinc-500"
+                      >
+                        <span>Carregar Mais Fileiras no Início (+6)</span>
+                      </button>
+                    </div>
+                  )}
                 </div>
               </>
             )}

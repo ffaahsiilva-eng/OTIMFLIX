@@ -246,7 +246,8 @@ app.get('/api/live-hls/master.m3u8', async (req, res) => {
   }
 
   const hash = crypto.createHash('md5').update(streamUrl).digest('hex').slice(0, 12);
-  const sessionId = `${hash}_${forceTranscode ? 'tc' : 'rx'}`;
+  const seek = req.query.seek ? Math.floor(parseFloat(req.query.seek as string)) : 0;
+  const sessionId = `${hash}_${forceTranscode ? 'tc' : 'rx'}${seek > 0 ? `_s${seek}` : ''}`;
   const sessionDir = path.join('/tmp', `hls_${sessionId}`);
 
   let session = hlsSessions.get(sessionId);
@@ -264,13 +265,21 @@ app.get('/api/live-hls/master.m3u8', async (req, res) => {
     const ffmpegArgs: string[] = [
       '-hide_banner',
       '-loglevel', 'warning',
+      '-threads', '0',
       '-reconnect', '1',
       '-reconnect_streamed', '1',
-      '-reconnect_delay_max', '5',
+      '-reconnect_delay_max', '3',
+      '-rw_timeout', '15000000',
       '-timeout', '15000000',
+      '-buffer_size', '10485760',
       '-headers', 'User-Agent: VLC/3.0.18 LibVLC/3.0.18\r\nAccept: */*\r\n',
-      '-i', streamUrl,
     ];
+
+    if (seek > 0) {
+      ffmpegArgs.push('-ss', seek.toString());
+    }
+
+    ffmpegArgs.push('-i', streamUrl);
 
     if (forceTranscode) {
       ffmpegArgs.push(
@@ -285,7 +294,7 @@ app.get('/api/live-hls/master.m3u8', async (req, res) => {
         '-ar', '48000'
       );
     } else {
-      // Smart remux: keep video, transcode audio to universal AAC
+      // Ultra-fast remux: copy original video untouched, encode only audio to AAC
       ffmpegArgs.push(
         '-c:v', 'copy',
         '-c:a', 'aac',
@@ -297,7 +306,7 @@ app.get('/api/live-hls/master.m3u8', async (req, res) => {
 
     ffmpegArgs.push(
       '-f', 'hls',
-      '-hls_time', '4',
+      '-hls_time', '6',
       '-hls_list_size', '0',
       '-hls_playlist_type', 'event',
       '-hls_segment_filename', segmentPattern,
@@ -393,20 +402,67 @@ app.all('/api/live-hls/stop', (req, res) => {
   if (streamUrl) {
     const hash = crypto.createHash('md5').update(streamUrl).digest('hex').slice(0, 12);
     for (const suffix of ['rx', 'tc']) {
-      const sessionId = `${hash}_${suffix}`;
-      const session = hlsSessions.get(sessionId);
-      if (session) {
-        try {
-          session.process.kill('SIGKILL');
-        } catch (e) {}
-        try {
-          fs.rmSync(session.dir, { recursive: true, force: true });
-        } catch (e) {}
-        hlsSessions.delete(sessionId);
+      for (const [id, session] of hlsSessions.entries()) {
+        if (id.startsWith(`${hash}_`)) {
+          try {
+            session.process.kill('SIGKILL');
+          } catch (e) {}
+          try {
+            fs.rmSync(session.dir, { recursive: true, force: true });
+          } catch (e) {}
+          hlsSessions.delete(id);
+        }
       }
     }
   }
   res.sendStatus(200);
+});
+
+// Fast duration lookup for accurate movie timeline and seek
+app.get('/api/media-duration', (req, res) => {
+  const streamUrl = req.query.url as string;
+  if (!streamUrl) {
+    return res.status(400).json({ error: 'URL required' });
+  }
+
+  const proc = spawn('ffprobe', [
+    '-v', 'error',
+    '-rw_timeout', '5000000',
+    '-timeout', '5000000',
+    '-headers', 'User-Agent: VLC/3.0.18 LibVLC/3.0.18\r\nAccept: */*\r\n',
+    '-show_entries', 'format=duration:stream=duration',
+    '-of', 'default=noprint_wrappers=1:nokey=1',
+    streamUrl,
+  ]);
+
+  let output = '';
+  proc.stdout?.on('data', (d) => {
+    output += d.toString();
+  });
+
+  const timer = setTimeout(() => {
+    try {
+      proc.kill('SIGKILL');
+    } catch (e) {}
+  }, 4000);
+
+  proc.on('close', () => {
+    clearTimeout(timer);
+    const lines = output.trim().split('\n').filter(Boolean);
+    let duration = 0;
+    for (const line of lines) {
+      const val = parseFloat(line);
+      if (!isNaN(val) && val > duration) {
+        duration = val;
+      }
+    }
+    res.json({ duration: Math.round(duration) });
+  });
+
+  proc.on('error', () => {
+    clearTimeout(timer);
+    res.json({ duration: 0 });
+  });
 });
 
 // Real-time on-the-fly video & audio remux/transcoding using native FFmpeg
